@@ -1,0 +1,134 @@
+data:
+  raw_dir: data/raw
+  csv_sep: auto              # auto | "," | ";" | "\t"
+  time_unit: auto            # auto (ikut format terdeteksi) | s | ms | us
+  column_map:                # format dideteksi dari header; nama kolom sumber di-strip dulu
+    cic:                     # CIC-IDS2017 asli (CICFlowMeter, GeneratedLabelledFlows)
+      time_unit: us
+      columns:
+        duration: Flow Duration
+        iat_mean: Flow IAT Mean
+        iat_std: Flow IAT Std
+        fwd_packets_count: Total Fwd Packets
+        bwd_packets_count: Total Backward Packets
+        protocol: Protocol
+        src_port: Source Port
+        dst_port: Destination Port
+    darknet:                 # CIC-Darknet2020 (CICFlowMeter); header memuat "Label" dua kali
+      time_unit: us
+      columns:
+        duration: Flow Duration
+        iat_mean: Flow IAT Mean
+        iat_std: Flow IAT Std
+        fwd_packets_count: Total Fwd Packet
+        bwd_packets_count: Total Bwd packets
+        protocol: Protocol
+        src_port: Src Port
+        dst_port: Dst Port
+      label_columns:         # opsional; nama sumber -> kolom internal (pandas menamai duplikat "Label.1")
+        traffic_type: Label        # Non-Tor | NonVPN | Tor | VPN
+        app_category: Label.1      # kategori aplikasi, mis. VOIP
+    bccc:                    # BCCC-CIC-IDS2017 (NTLFlowLyzer)
+      time_unit: s
+      columns:
+        duration: duration
+        iat_mean: packet_IAT_mean   # belum diuji pada data nyata
+        iat_std: packet_IAT_std
+        fwd_packets_count: fwd_packets_count
+        bwd_packets_count: bwd_packets_count
+        protocol: protocol
+        src_port: src_port
+        dst_port: dst_port
+  min_session:               # filter sesi minimum di praproses; null = nonaktif
+    fwd: 5                   # minimal paket fwd per flow
+    bwd: 5                # minimal paket bwd per flow
+  exclude_traffic_types: [Tor]  # mis. [Tor]; dibandingkan tanpa peduli huruf besar/kecil
+  max_train_rows: 200000
+  random_state: 42
+  voip_filter:
+    mode: label              # label (app_category == label_value) | port (UDP + port SIP/RTP)
+    label_value: VOIP        # dibandingkan tanpa peduli huruf besar/kecil
+    protocol: 17
+    sip_ports: [5060, 5061]
+    rtp_port_ranges: [[10000, 20000], [16384, 32767]]
+    min_flows_warning: 200
+    fallback_udp_all: false
+retrain:
+  log_source:               # sumber latih ulang = log jendela monitoring (reports/riwayat/jendela_*.csv)
+    exclude_insufficient: true   # WAJIB true: baris "Data Belum Cukup" tidak punya fitur valid
+    exclude_anomaly: true        # buang baris berlabel Anomali (noise model sebelumnya)
+    per_flow: last               # last = satu baris per flow (jendela terakhir) | all = semua jendela
+    exclude_imputed: true        # buang baris diimputasi = true (fitur memakai median imputasi)
+    feature_mode: cumulative     # hanya baris dengan mode ini; CSV lama tanpa kolom feature_mode = tidak diketahui → dibuang; null = semua mode
+    min_rows: 200                # jumlah minimum baris setelah pengecualian; di bawah ini latih ulang ditolak
+experiments:             # varian fitur untuk scripts/compare_variants.py (tidak mengubah model aktif)
+  feature_variants:
+    A:
+      cluster_columns: [iat_mean_us, iat_std_us, fwd_packets_count, bwd_packets_count]
+      log_transform: []
+    B:
+      cluster_columns: [iat_mean_us, iat_std_us, fai_pct]
+      log_transform: []
+    C:
+      cluster_columns: [iat_mean_us, iat_std_us, fai_pct]
+      log_transform: [iat_mean_us, iat_std_us]
+    C_logfai:                # eksperimen 19 Okt 2026 yang keliru memberi log1p pada FAI; dipertahankan sebagai pembanding
+      cluster_columns: [iat_mean_us, iat_std_us, fai_pct]
+      log_transform: [iat_mean_us, iat_std_us, fai_pct]
+  top_n: 5
+eda:
+  sensitivity_n: [1, 5, 10, 20, 50]   # nilai N untuk analisis sensitivitas filter sesi (fwd >= N dan bwd >= N)
+  sensitivity_exclude: [Tor]          # traffic type yang dikeluarkan pada tampilan "tanpa ..."
+  duration_cap_s: 120                 # batas durasi flow CICFlowMeter (flow terpotong)
+  duration_cap_tol_ms: 1              # durasi dalam toleransi ini dari batas dianggap "menempel"
+  suspect_ports: [53, 123, 137, 138, 1900, 5353]   # port lawan yang kemungkinan bukan VoIP (hanya laporan)
+features:
+  fai_clip_negative: true    # FAI < 0 (bwd > fwd) dijadikan 0
+  delay_column: iat_mean_us    # proksi delay (µs) → delay_ms
+  jitter_column: iat_std_us    # jitter (µs) → jitter_ms
+  cluster_columns: [iat_mean_us, iat_std_us, fai_pct]   # Varian C (dipilih 19 Okt 2026); boleh memuat turunan fai_pct
+  log_transform: [iat_mean_us, iat_std_us]              # di-log1p sebelum StandardScaler; fai_pct TIDAK di-log
+hdbscan:
+  min_cluster_size: 5
+  min_samples: 2
+  cluster_selection_method: eom
+  grid_search:
+    enabled: true
+    min_cluster_size: [5, 10, 15, 20, 25]
+    min_samples: [1, 2, 5, 10, 20]
+    max_noise_ratio: 0.20
+    silhouette_sample_size: 10000
+evaluation:
+  silhouette_bands: [0.70, 0.50, 0.25]   # Strong > 0,70; Reasonable > 0,50; Weak > 0,25; selebihnya No Substantial
+  noise_ideal: [0.01, 0.10]            # Noise Ratio ideal (inklusif)
+  noise_too_strict: 0.20               # di atas ini dianggap terlalu ketat
+  target_silhouette: 0.50              # target RM6 (dilaporkan, bukan test gagal)
+  pca_sample_size: 5000                # maks titik latih untuk latar scatter PCA
+profiling:
+  jitter_percentile: 99.9   # persentil jitter untuk pelabelan (P99,9)
+  max_outliers: 500         # maks pencilan yang disimpan per metrik per klaster
+thresholds:
+  delay_good_ms: 150.0
+  delay_max_ms: 400.0
+  jitter_max_ms: 50.0
+  loss_max_pct: 0.1
+monitoring:
+  capture_backend: scapy     # scapy (default sejak 19 Okt 2026) | pyshark | replay
+  bpf_filter: "udp and not port 443 and not port 53 and not port 123 and not port 5353 and not port 1900"   # buang QUIC/DNS/NTP/mDNS/SSDP
+  tshark_path: null          # kosong = cari di PATH dan lokasi instalasi Wireshark
+  live_poll_sec: 0.5         # detak sumber live saat tidak ada paket (menutup jendela tepat waktu)
+  window_sec: 5
+  flow_idle_timeout_sec: 120   # flow tanpa paket selama ini dibuang dari flow table
+  feature_mode: cumulative   # cumulative (default) | window
+  min_packets_per_window: 10
+  min_session_live:          # flow/jendela di bawah ini tidak diprediksi ("Data Belum Cukup"); null = nonaktif
+    fwd: 5
+    bwd: 5
+  refresh_sec: 2
+  replay_speed: 1.0
+  kritis_ratio: 0.5
+paths:
+  artifacts_dir: artifacts
+  reports_dir: reports
+  logs_dir: logs
+  recommendations_file: config/recommendations.yaml

@@ -1,0 +1,32 @@
+# Aturan rekomendasi mitigasi (PRD FR-REC). Hanya untuk "QoS Buruk" dan "Anomali".
+# Klaster dengan beberapa metrik penyebab menggabungkan saran semua metrik (urutan: delay, jitter, loss).
+rules:
+  delay:
+    pemicu: Delay Melebihi Batas
+    kategori: Perbaikan Kapasitas/Konfigurasi
+    saran:
+      - Perlebar bandwidth jalur VoIP
+      - Prioritas antrean DiffServ (EF)
+      - Evaluasi beban router dan jalur routing
+  jitter:
+    pemicu: Jitter Melebihi Batas
+    kategori: Perbaikan Kapasitas/Konfigurasi
+    saran:
+      - Priority queuing untuk RTP
+      - Periksa kongesti/buffer antrean
+      - Sesuaikan jitter buffer endpoint
+  loss:
+    pemicu: Packet Loss Melebihi Batas
+    kategori: Perbaikan Kapasitas/Konfigurasi
+    saran:
+      - Periksa utilisasi antrean dan buffer router
+      - Periksa error interface
+      - Periksa kualitas media transmisi
+  anomali:
+    pemicu: Anomali
+    kategori: Investigasi Kasus Tunggal
+    saran:
+      - Periksa potensi flood/burst
+      - Periksa gangguan fisik media transmisi
+      - Periksa kegagalan gateway
+      - Cocokkan timestamp dengan log perangkat
