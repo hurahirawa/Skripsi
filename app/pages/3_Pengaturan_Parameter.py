@@ -28,22 +28,26 @@ st.subheader("Ambang ITU")
 default_th = art.profile["thresholds"]  # ambang saat model dilatih = default skripsi
 st.warning(
     "Perubahan ambang ITU di sini hanya untuk **eksplorasi**. Hasil skripsi memakai ambang default "
-    "(ITU-T G.114 untuk delay; ITU-T Y.1541 Kelas 0/1 untuk jitter dan packet loss): "
+    "(ITU-T G.114 untuk delay; ITU-T Y.1541 Kelas 0/1 untuk jitter; ITU-T G.1010 dan panduan Cisco VoIP untuk packet loss): "
     f"delay {default_th['delay_good_ms']:g}/{default_th['delay_max_ms']:g} ms, "
-    f"jitter {default_th['jitter_max_ms']:g} ms, loss {default_th['loss_max_pct']:g}%."
+    f"jitter {default_th['jitter_max_ms']:g} ms, loss {default_th['loss_good_pct']:g}/{default_th['loss_max_pct']:g}%."
 )
-d1, d2, d3, d4 = st.columns(4)
+d1, d2, d3, d4, d5 = st.columns(5)
 delay_good = d1.number_input("Delay baik (ms)", min_value=0.0, value=float(t["delay_good_ms"]))
 delay_max = d2.number_input("Delay maks (ms)", min_value=0.0, value=float(t["delay_max_ms"]))
 jitter_max = d3.number_input("Jitter maks (ms)", min_value=0.0, value=float(t["jitter_max_ms"]))
-loss_max = d4.number_input("Loss maks (%)", min_value=0.0, value=float(t["loss_max_pct"]), format="%.3f")
+loss_good = d4.number_input("Loss baik (%)", min_value=0.0, value=float(t["loss_good_pct"]), format="%.3f")
+loss_max = d5.number_input("Loss maks (%)", min_value=0.0, value=float(t["loss_max_pct"]), format="%.3f")
 thresholds = {
-    "delay_good_ms": delay_good, "delay_max_ms": delay_max, "jitter_max_ms": jitter_max, "loss_max_pct": loss_max,
+    "delay_good_ms": delay_good, "delay_max_ms": delay_max, "jitter_max_ms": jitter_max,
+    "loss_good_pct": loss_good, "loss_max_pct": loss_max,
 }
 
 errors = []
 if delay_good > delay_max:
     errors.append("Delay baik tidak boleh lebih besar dari delay maks.")
+if loss_good > loss_max:
+    errors.append("Loss baik tidak boleh lebih besar dari loss maks.")
 for e in errors:
     st.error(e)
 

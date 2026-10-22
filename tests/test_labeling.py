@@ -18,7 +18,7 @@ def test_level_delay_batas():
 
 def test_level_jitter_dan_loss_batas():
     assert level_jitter(pd.Series([50.0, 50.01]), TH).tolist() == [1, 3]
-    assert level_loss(pd.Series([0.0, 0.1, 0.11]), TH).tolist() == [1, 1, 3]
+    assert level_loss(pd.Series([0.0, 1.0, 1.01, 3.0, 3.01]), TH).tolist() == [1, 1, 2, 2, 3]
     assert np.isnan(level_loss(pd.Series([np.nan]), TH).iloc[0])
 
 
@@ -39,6 +39,7 @@ TABEL_2_3 = [
     (2, 1, 1, 2, "QoS Cukup - Delay Meningkat"),
     (3, 1, 3, 3, "QoS Buruk - Delay dan Packet Loss Melebihi Batas"),
     (1, 3, 1, 3, "QoS Buruk - Jitter Melebihi Batas"),
+    (1, 1, 2, 2, "QoS Cukup - Packet Loss Meningkat"),
 ]
 
 
@@ -51,7 +52,7 @@ def test_tabel_2_3_naskah(d, j, l, t, label):
     assert label_cluster(levels)[0] == label
 
 
-@pytest.mark.parametrize("d,j,l", [(1, 1, 1), (2, 1, 1), (3, 1, 3), (1, 3, 1)])
+@pytest.mark.parametrize("d,j,l", [(1, 1, 1), (2, 1, 1), (3, 1, 3), (1, 3, 1), (1, 1, 2)])
 def test_noise_tabel_2_3_tanpa_tingkat(d, j, l):
     from qos.profiling.labeling import label_cluster
 

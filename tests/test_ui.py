@@ -246,7 +246,7 @@ def test_ui_terapkan_ulang_pelabelan_membuat_versi_tanpa_mengaktifkan(restore_ac
     current = Path(cfg["paths"]["artifacts_dir"]) / "current.txt"
     active = current.read_text("utf-8")
     at = run("pages/3_Pengaturan_Parameter.py")
-    at.number_input[3].set_value(1000.0).run()  # loss maks sangat longgar
+    at.number_input[4].set_value(1000.0).run()  # loss maks sangat longgar
     _btn(at, "Terapkan Ulang Pelabelan").click().run()
     assert not at.exception, [e.value for e in at.exception]
     res = at.session_state["relabel_result"]

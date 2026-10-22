@@ -3,7 +3,7 @@
 Dashboard web lokal (Streamlit) untuk administrator jaringan yang:
 
 1. melatih model **HDBSCAN** secara offline dari statistik aliran (unsupervised);
-2. memberi label tiap klaster **QoS Baik / Cukup / Buruk** berdasarkan ITU-T G.114 (delay) dan ITU-T Y.1541 Kelas 0/1 (jitter, packet loss), dengan noise (-1) sebagai **Anomali**;
+2. memberi label tiap klaster **QoS Baik / Cukup / Buruk** berdasarkan ITU-T G.114 (delay), ITU-T Y.1541 Kelas 0/1 (jitter), serta ITU-T G.1010 (conversational voice, PLR < 3%) dan panduan Cisco VoIP (PLR ≤ 1%) untuk packet loss, dengan noise (-1) sebagai **Anomali**;
 3. memetakan trafik per jendela waktu ke klaster yang sudah terbentuk (`hdbscan.approximate_predict`) lalu mewarisi label klaster;
 4. menampilkan label, visualisasi, dan rekomendasi mitigasi, serta menyimpan riwayat sesi ke CSV dan PDF.
 
@@ -158,7 +158,7 @@ Sidebar (semua halaman): versi model aktif, mode Replay PCAP / Live, sumber, Sta
 | `config/user_config.yaml` | Dibuat oleh *Save Configuration*; menimpa default; tidak di-commit; dihapus oleh *Reset to Default* |
 | `config/recommendations.yaml` | Aturan saran mitigasi per metrik (Delay, Jitter, Packet Loss, Anomali) |
 
-Ambang ITU default: delay 150/400 ms, jitter 50 ms, loss 0,1%. **Hasil skripsi memakai ambang default**; mengubah ambang di UI hanya untuk eksplorasi.
+Ambang ITU default: delay 150/400 ms, jitter 50 ms, loss 1/3% (≤1% baik, 1–3% cukup, >3% buruk; sumber ITU-T G.1010 + panduan Cisco VoIP). **Hasil skripsi memakai ambang default**; mengubah ambang di UI hanya untuk eksplorasi.
 
 Satuan internal: delay dan jitter dalam ms, loss dalam %; data CIC dalam µs dibagi 1000.
 
@@ -235,7 +235,7 @@ pytest tests/test_profile.py # uji Lampiran 5 (PRD §13)
 
 - **Data bukan khusus VoIP.** Filter `VOIP` pada Darknet menghasilkan 3.566 flow; setelah pengecualian Tor dan filter sesi tersisa 247 (193 UDP, 54 TCP). Jumlah ini kecil untuk grid `min_cluster_size` hingga 25.
 - **Semantik fitur bergeser.** Data latih adalah statistik seluruh flow (hingga 120 detik), sedangkan live memakai statistik kumulatif sejak awal flow atau per jendela 5 detik.
-- **Tidak ada klaster "QoS Baik"** pada model aktif. Klaster terbesar (123 flow, delay ≈ 10 ms) berlabel Buruk hanya karena PLR 0,1053% sedikit di atas ambang 0,1%. FAI bersifat diskret (satu paket selisih pada ±6000 paket = 0,0167%), dan P99,9 jitter pada klaster kecil ≈ nilai maksimum klaster. Kelas "QoS Cukup" kemungkinan kosong karena Y.1541 Kelas 0/1 hanya punya satu ambang untuk jitter dan loss. Ambang tidak diubah.
+- **Kelas "QoS Cukup" kosong** pada model aktif (`20261022_120925`, hasil Terapkan Ulang Pelabelan dari `20261019_204042` dengan ambang loss 1/3%): Baik 49,8% (klaster 5, 123 flow), Buruk 36,4%, Anomali 13,8%. Satu-satunya klaster dengan loss level 2 (klaster 7, PLR 2,37%) juga melanggar jitter, sehingga tetap Buruk. Dengan ambang Y.1541 0,1% sebelumnya, klaster terbesar berlabel Buruk hanya karena PLR 0,1053%; FAI bersifat diskret sehingga ambang itu terlalu ketat (lihat `reports/experiments/labeling_scenarios.md`). P99,9 jitter pada klaster kecil ≈ nilai maksimum klaster.
 - **Silhouette tinggi tidak otomatis berarti klaster bermakna QoS**; ekor ekstrem pada fitur dapat membentuk klaster tersendiri (lihat `scripts/compare_variants.py` untuk perbandingan varian fitur).
 - **Demo PCAP bersifat sintetis** (`--make-demo`). Perbandingan `window` vs `cumulative` pada PCAP VoIP nyata belum dilakukan.
 - **Backend pyshark** belum diuji dengan TShark sungguhan.

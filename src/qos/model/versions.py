@@ -19,7 +19,7 @@ REQUIRED_FILES: tuple[str, ...] = (
     "hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "cluster_profile.json", "train_meta.json",
 )
 COPY_FILES: tuple[str, ...] = ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "grid_results.csv", "training_sample.csv")
-THRESHOLD_KEYS: tuple[str, ...] = ("delay_good_ms", "delay_max_ms", "jitter_max_ms", "loss_max_pct")
+THRESHOLD_KEYS: tuple[str, ...] = ("delay_good_ms", "delay_max_ms", "jitter_max_ms", "loss_good_pct", "loss_max_pct")
 
 
 class VersionError(RuntimeError):
@@ -90,6 +90,8 @@ def validate_thresholds(thresholds: dict[str, float]) -> dict[str, float]:
         raise VersionError("Ambang tidak boleh negatif")
     if out["delay_good_ms"] > out["delay_max_ms"]:
         raise VersionError("delay_good_ms tidak boleh lebih besar dari delay_max_ms")
+    if out["loss_good_pct"] > out["loss_max_pct"]:
+        raise VersionError("loss_good_pct tidak boleh lebih besar dari loss_max_pct")
     return out
 
 

@@ -68,12 +68,12 @@ def test_labeling_bars_tiga_panel_dan_garis_ambang():
     assert list(fig.data[0].x) == ["Noise", "K0", "K1"]
     assert list(fig.data[0].marker.color) == ["#DC2626", "#2563EB", "#F97316"]
     ys = sorted(s["y0"] for s in fig.layout.shapes)
-    assert ys == sorted([TH["delay_good_ms"], TH["delay_max_ms"], TH["jitter_max_ms"], TH["loss_max_pct"]])
+    assert ys == sorted([TH["delay_good_ms"], TH["delay_max_ms"], TH["jitter_max_ms"], TH["loss_good_pct"], TH["loss_max_pct"]])
 
 
 @pytest.mark.parametrize(
     "metric,expected",
-    [("delay_ms", [TH["delay_good_ms"], TH["delay_max_ms"]]), ("jitter_ms", [TH["jitter_max_ms"]]), ("fai_pct", [TH["loss_max_pct"]])],
+    [("delay_ms", [TH["delay_good_ms"], TH["delay_max_ms"]]), ("jitter_ms", [TH["jitter_max_ms"]]), ("fai_pct", [TH["loss_good_pct"], TH["loss_max_pct"]])],
 )
 def test_boxplot_dari_statistik_tersimpan(metric, expected):
     fig = boxplot_fig(PROFILE, metric, TH)

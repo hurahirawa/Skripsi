@@ -22,7 +22,8 @@ def test_default_config_termuat():
         "delay_good_ms": 150.0,
         "delay_max_ms": 400.0,
         "jitter_max_ms": 50.0,
-        "loss_max_pct": 0.1,
+        "loss_good_pct": 1.0,
+        "loss_max_pct": 3.0,
     }
     assert cfg["hdbscan"]["min_cluster_size"] == 5
     assert cfg["hdbscan"]["min_samples"] == 2

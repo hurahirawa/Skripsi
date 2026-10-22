@@ -22,7 +22,7 @@ from qos.profiling.profile import (
 
 CFG = load_config(use_user=False)
 FIXTURE = Path(__file__).parent / "fixtures" / "lampiran_l21.csv"
-BURUK_LOSS = "QoS Buruk - Packet Loss Melebihi Batas"
+BAIK = "QoS Baik"
 BURUK_DELAY_LOSS = "QoS Buruk - Delay dan Packet Loss Melebihi Batas"
 ANOMALI = "Anomali - Delay dan Packet Loss Ekstrem"
 
@@ -72,13 +72,14 @@ def test_l5_q1_q3_delay(profile):
 
 
 def test_l5_label(profile):
-    assert by_id(profile, 0)["label"] == BURUK_LOSS
+    # K0: PLR 0,99% ≤ loss_good_pct 1% → QoS Baik (ambang loss 3 level, S1)
+    assert by_id(profile, 0)["label"] == BAIK
     assert by_id(profile, 1)["label"] == BURUK_DELAY_LOSS
     assert by_id(profile, -1)["label"] == ANOMALI
-    assert label_map(profile) == {"-1": ANOMALI, "0": BURUK_LOSS, "1": BURUK_DELAY_LOSS}
-    assert by_id(profile, 0)["kategori_tindakan"] == "Perbaikan Kapasitas/Konfigurasi"
+    assert label_map(profile) == {"-1": ANOMALI, "0": BAIK, "1": BURUK_DELAY_LOSS}
+    assert by_id(profile, 0)["kategori_tindakan"] == "-"
     assert by_id(profile, -1)["kategori_tindakan"] == "Investigasi Kasus Tunggal"
-    assert by_id(profile, 0)["tingkat"] == {"delay": 1, "jitter": 1, "loss": 3, "klaster": 3}
+    assert by_id(profile, 0)["tingkat"] == {"delay": 1, "jitter": 1, "loss": 1, "klaster": 1}
 
 
 def test_l5_fai(l21):
@@ -148,12 +149,13 @@ def test_join_metrics():
 
 def test_cluster_levels_batas():
     th = CFG["thresholds"]
-    assert cluster_levels({"mean_delay_ms": 150.0, "p999_jitter_ms": 50.0, "plr_pct": 0.1}, th) == {
+    assert cluster_levels({"mean_delay_ms": 150.0, "p999_jitter_ms": 50.0, "plr_pct": 1.0}, th) == {
         "delay": 1, "jitter": 1, "loss": 1,
     }
-    assert cluster_levels({"mean_delay_ms": 400.0, "p999_jitter_ms": 50.1, "plr_pct": 0.11}, th) == {
-        "delay": 2, "jitter": 3, "loss": 3,
+    assert cluster_levels({"mean_delay_ms": 400.0, "p999_jitter_ms": 50.1, "plr_pct": 1.01}, th) == {
+        "delay": 2, "jitter": 3, "loss": 2,
     }
+    assert cluster_levels({"mean_delay_ms": 150.0, "p999_jitter_ms": 50.0, "plr_pct": 3.01}, th)["loss"] == 3
 
 
 # ---- Fungsi dasar --------------------------------------------------------------------------------

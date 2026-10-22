@@ -5,7 +5,7 @@ Versi 1.0 · 12 Oktober 2026 · Pemilik: Hizkia Rahuel Anglie (535230073), Tekni
 Web Dashboard lokal (Streamlit) untuk administrator jaringan/NOC yang:
 
 Melatih model HDBSCAN secara offline dari statistik aliran CIC-IDS2017 (unsupervised, tanpa label).
-Memberi label setiap klaster: QoS Baik / QoS Cukup / QoS Buruk berdasarkan ITU-T G.114 (delay) dan ITU-T Y.1541 Kelas 0/1 (jitter, packet loss). Noise (-1) = Anomali.
+Memberi label setiap klaster: QoS Baik / QoS Cukup / QoS Buruk berdasarkan ITU-T G.114 (delay), ITU-T Y.1541 Kelas 0/1 (jitter), serta ITU-T G.1010 (conversational voice, PLR < 3%) dan panduan Cisco VoIP (PLR ≤ 1%) untuk packet loss. Noise (-1) = Anomali.
 Memetakan trafik VoIP live per jendela waktu ke klaster yang sudah terbentuk via approximate_predict(), lalu mewarisi label klaster (lookup, tanpa hitung ulang).
 Menampilkan label, visualisasi, dan rekomendasi mitigasi secara real-time, serta menyimpan riwayat dalam CSV.
 
@@ -158,7 +158,7 @@ Statistik pelabelan: mean delay, P99,9 jitter (p = 0,999), PLR klaster (Pers. 2.
 FR-LBL Pelabelan (Pers. 2.13–2.14, ambang dari config)
 L_delay: 1 jika ≤150; 2 jika 150<d≤400; 3 jika >400
 L_jitter: 1 jika P99,9 ≤50; 3 jika >50
-L_loss: 1 jika PLR ≤0,1%; 3 jika >0,1%
+L_loss: 1 jika PLR ≤1% (loss_good_pct); 2 jika 1<PLR≤3% (loss_max_pct); 3 jika >3%. Sumber: ITU-T G.1010 (conversational voice, PLR < 3%) + panduan Cisco VoIP (≤ 1%). (Diubah 22 Okt 2026 dari satu ambang 0,1% Y.1541 atas persetujuan dosen; delay dan jitter tidak berubah.)
 T = max(L_delay, L_jitter, L_loss)
 Format: T=1 → "QoS Baik"; selain itu "QoS {Cukup|Buruk} - {metrik penyebab}" dengan metrik penyebab = metrik yang levelnya = T; keterangan "Meningkat" untuk level 2, "Melebihi Batas" untuk level 3. Nama metrik: Delay, Jitter, Packet Loss; gabung dengan ", " dan " dan " sebelum item terakhir. Contoh: "QoS Cukup - Delay Meningkat", "QoS Buruk - Delay dan Packet Loss Melebihi Batas"
 Noise (-1): hitung level dengan cara sama; metrik berlevel 3 → "Anomali - {metrik} Ekstrem"; jika tidak ada → "Anomali"
@@ -197,7 +197,7 @@ Warna label: Baik
 #DC2626 (merah)
 PCA scatter 2D (hover, zoom, pan): latar titik latih pudar + titik jendela live
 Bar chart statistik pelabelan per klaster (mean delay, P99,9 jitter, PLR) dengan garis ambang ITU
-Box plot per metrik per klaster (termasuk noise) dari statistik tersimpan memakai go.Box(q1, median, q3, lowerfence, upperfence); garis ambang 150 & 400 ms (delay), 50 ms (jitter), 0,1% (loss); penanda mean delay, P99,9 jitter, PLR. Toggle skala log. Profil TIDAK dihitung ulang per jendela.
+Box plot per metrik per klaster (termasuk noise) dari statistik tersimpan memakai go.Box(q1, median, q3, lowerfence, upperfence); garis ambang 150 & 400 ms (delay), 50 ms (jitter), 1% dan 3% (loss); penanda mean delay, P99,9 jitter, PLR. Toggle skala log. Profil TIDAK dihitung ulang per jendela.
 9. Halaman UI (sesuai Lampiran 7 skripsi)
 
 P1 Dashboard Overview
@@ -216,7 +216,7 @@ Tabel sampel data: baris individual + cluster_id + membership_prob
 P3 Pengaturan Parameter & Ambang Batas
 
 Slider min_cluster_size 2–50 (default 5), min_samples 1–20 (default 2), toggle grid search otomatis
-Input ambang: delay baik 150, delay maks 400, jitter maks 50, loss maks 0,1
+Input ambang: delay baik 150, delay maks 400, jitter maks 50, loss baik 1, loss maks 3
 Tombol Save Configuration, Reset to Default, Terapkan Ulang Pelabelan, Latih Ulang Model (disabled saat monitoring; progress bar; setelah selesai tampilkan skor + tombol "Aktifkan model ini")
 
 P4 Rekomendasi Mitigasi & Ekspor Laporan
@@ -233,7 +233,7 @@ hdbscan_model.joblib, scaler.joblib, pca.joblib, cluster_profile.json, train_met
 json
 {
   "model_version": "20261012_230000",
-  "thresholds": {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 50, "loss_max_pct": 0.1},
+  "thresholds": {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 50, "loss_good_pct": 1.0, "loss_max_pct": 3.0},
   "evaluation": {"silhouette": 0.0, "silhouette_label": "", "chi": 0.0, "noise_ratio": 0.0, "n_clusters": 0},
   "clusters": [
     {
@@ -314,7 +314,8 @@ thresholds:
   delay_good_ms: 150.0
   delay_max_ms: 400.0
   jitter_max_ms: 50.0
-  loss_max_pct: 0.1
+  loss_good_pct: 1.0
+  loss_max_pct: 3.0
 monitoring:
   capture_backend: scapy     # scapy (default) | pyshark | replay
   bpf_filter: "udp and not port 443 and not port 53 and not port 123 and not port 5353 and not port 1900"
@@ -367,7 +368,7 @@ Std delay (ms)	18.71	49.70	241.17
 P99,9 jitter (ms)	0.92	4.12	24.09
 PLR (%)	0.99	22.92	47.11
 Q1 / Q3 delay (ms)	95.40 / 120.54	467.69 / 502.83	1050.18 / 1285.00
-Label	QoS Buruk - Packet Loss Melebihi Batas	QoS Buruk - Delay dan Packet Loss Melebihi Batas	Anomali - Delay dan Packet Loss Ekstrem
+Label	QoS Baik (PLR 0,99% ≤ 1%; naskah lama dengan ambang 0,1%: QoS Buruk - Packet Loss Melebihi Batas)	QoS Buruk - Delay dan Packet Loss Melebihi Batas	Anomali - Delay dan Packet Loss Ekstrem
 
 Tambahan: FAI s1 = 1.33, s2 = 20.45, s10 = 52.00; pagar delay K0 = 57.69 / 158.25; whisker K0 = 89.40 / 135.20; noise ratio = 30%; semua kombinasi Tabel 2.3 menghasilkan string label yang benar.
 
@@ -392,7 +393,7 @@ M9 README, screenshot tiap halaman (untuk Bab/Lampiran)
 15. Risiko Teknis
 Hasil Varian C (19 Okt 2026, model 20261019_175647: 8 klaster + noise 13,77%, Silhouette 0,8866): tidak ada klaster "QoS Baik"; semua klaster berlabel "QoS Buruk" dan noise "Anomali". Klaster terbesar (123 flow, delay ≈ 10 ms) berlabel Buruk hanya karena PLR 0,1053% sedikit di atas ambang 0,1%. Mode window menghasilkan FAI ≈ 0,13% pada RTP tanpa loss karena efek batas jendela (selisih satu paket antara fwd dan bwd di tepi jendela), sehingga cumulative dijadikan default (19 Okt 2026). Resolusi FAI vs ambang 0,1%: FAI diskret (selisih satu paket pada flow berisi ~6000 paket = 0,0167%, dan pada flow < 1000 paket satu paket selisih sudah > 0,1%), sehingga ambang 0,1% nyaris berarti "tidak ada selisih paket sama sekali" dan sangat sensitif terhadap satu-dua paket. P99,9 jitter pada klaster kecil (n < 1000) berinterpolasi ke ujung atas data sehingga ≈ nilai maksimum klaster (rasio P99,9/maks 0,90–1,00 pada model ini), bukan persentil yang stabil. Ambang tidak diubah. Dataset bukan dirancang khusus untuk VoIP; jumlah flow lolos filter kecil → dicek di M1 (19 Okt 2026): 3.566 flow berlabel VOIP di Darknet.CSV, 247 flow setelah exclude Tor dan fwd/bwd ≥ 5 (193 UDP, 54 TCP; NonVPN 153, VPN 94), sehingga min_flows_warning diturunkan ke 200 dan grid min_cluster_size dibatasi ≤ 25
 Semantik fitur: (diubah 19 Okt 2026: delay kini memakai Flow IAT Mean karena Flow Duration menempel ke batas 120 detik dan jauh di atas ambang ITU) Flow Duration CIC = durasi seluruh flow, sedangkan live dihitung per jendela → distribusi bisa bergeser; bandingkan window vs cumulative saat M4
-Kelas "QoS Cukup" (T = 2) kemungkinan kosong (catatan 19 Okt 2026): Y.1541 Kelas 0/1 hanya punya satu ambang untuk jitter dan loss, sehingga level 2 hanya bisa berasal dari delay; ambang tidak diubah. Ambang PLR 0,1% sangat ketat terhadap estimasi FAI (pada contoh Lampiran 5 bahkan klaster terbaik sudah 0,99%); kemungkinan tidak ada klaster "QoS Baik" → laporkan distribusi label di M3 dan jangan mengubah ambang tanpa persetujuan
+Ambang loss 3 level (diubah 22 Okt 2026, disetujui dosen): ≤1% baik, 1–3% cukup, >3% buruk; sumber ITU-T G.1010 (conversational voice, PLR < 3%) + panduan Cisco VoIP (≤ 1%). Alasan: ambang Y.1541 0,1% terlalu ketat terhadap estimasi FAI yang diskret (lihat catatan 19 Okt 2026) sehingga tidak ada klaster "QoS Baik". Hasil relabel model 20261019_204042 → 20261022_120925 (tanpa refit): QoS Baik 49,8% (klaster 5, 123 flow), Cukup 0%, Buruk 36,4%, Anomali 13,8%; hanya klaster 5 (→ Baik) dan 7 (→ "Jitter Melebihi Batas") berubah label. "QoS Cukup" tetap kosong pada model ini karena klaster dengan loss level 2 (klaster 7) juga melanggar jitter. Rincian skenario S0–S3: reports/experiments/labeling_scenarios.md. Lampiran 5: label K0 kini "QoS Baik" (PLR 0,99% ≤ 1%).
 min_cluster_size kecil pada data besar → klaster sangat banyak; andalkan grid search
 Silhouette O(n²) → wajib sample_size
 Live capture butuh hak Administrator/root dan tshark/Npcap

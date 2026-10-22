@@ -111,7 +111,8 @@ thresholds:
   delay_good_ms: 150.0
   delay_max_ms: 400.0
   jitter_max_ms: 50.0
-  loss_max_pct: 0.1
+  loss_good_pct: 1.0   # ≤ ini level 1 (ITU-T G.1010 conversational voice PLR < 3%; panduan Cisco VoIP ≤ 1%)
+  loss_max_pct: 3.0    # ≤ ini level 2; di atasnya level 3
 monitoring:
   capture_backend: scapy     # scapy (default sejak 19 Okt 2026) | pyshark | replay
   bpf_filter: "udp and not port 443 and not port 53 and not port 123 and not port 5353 and not port 1900"   # buang QUIC/DNS/NTP/mDNS/SSDP

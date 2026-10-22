@@ -69,7 +69,7 @@ def test_cause_metrics_semua_kombinasi():
 
 
 def test_apply_labels_format_string_dan_ambang():
-    th = {"delay_good_ms": 150.0, "delay_max_ms": 400.0, "jitter_max_ms": 50.0, "loss_max_pct": 0.1}
+    th = {"delay_good_ms": 150.0, "delay_max_ms": 400.0, "jitter_max_ms": 50.0, "loss_good_pct": 1.0, "loss_max_pct": 3.0}
     out = apply_labels({"mean_delay_ms": 485.26, "p999_jitter_ms": 4.12, "plr_pct": 22.92}, th)
     assert out["metrik_penyebab"] == "delay;loss" and out["tingkat"]["klaster"] == 3
     assert out["label"] == "QoS Buruk - Delay dan Packet Loss Melebihi Batas"
@@ -106,9 +106,9 @@ def test_profil_lama_tanpa_kolom_dihitung_dari_tingkat(active_cfg):
 
 # ---- versioning & relabel -----------------------------------------------------------------------
 def test_validate_thresholds():
-    ok = {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 50, "loss_max_pct": 0.1}
-    assert validate_thresholds(ok)["loss_max_pct"] == 0.1
-    for bad in ({**ok, "delay_good_ms": 500}, {**ok, "jitter_max_ms": -1}, {k: v for k, v in ok.items() if k != "loss_max_pct"}):
+    ok = {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 50, "loss_good_pct": 1, "loss_max_pct": 3}
+    assert validate_thresholds(ok)["loss_max_pct"] == 3.0
+    for bad in ({**ok, "delay_good_ms": 500}, {**ok, "jitter_max_ms": -1}, {**ok, "loss_good_pct": 5}, {k: v for k, v in ok.items() if k != "loss_max_pct"}):
         with pytest.raises(VersionError):
             validate_thresholds(bad)
 
@@ -120,12 +120,12 @@ def test_relabel_profile_murni_dari_statistik_tersimpan(active_cfg):
     assert [c["label"] for c in same["clusters"]] == [c["label"] for c in doc["clusters"]]
     assert same["evaluation"] == doc["evaluation"]
     # ambang super longgar → semua klaster non-noise menjadi QoS Baik, noise tetap Anomali (tanpa metrik penyebab)
-    loose = relabel_profile(doc, {"delay_good_ms": 1e9, "delay_max_ms": 1e9, "jitter_max_ms": 1e9, "loss_max_pct": 1e9})
+    loose = relabel_profile(doc, {"delay_good_ms": 1e9, "delay_max_ms": 1e9, "jitter_max_ms": 1e9, "loss_good_pct": 1e9, "loss_max_pct": 1e9})
     for c in loose["clusters"]:
         assert c["label"] == ("Anomali" if c["id_klaster"] == -1 else "QoS Baik")
         assert c["metrik_penyebab"] == ""
     # ambang super ketat → semua non-noise Buruk karena semua metrik
-    tight = relabel_profile(doc, {"delay_good_ms": 0, "delay_max_ms": 0, "jitter_max_ms": 0, "loss_max_pct": 0})
+    tight = relabel_profile(doc, {"delay_good_ms": 0, "delay_max_ms": 0, "jitter_max_ms": 0, "loss_good_pct": 0, "loss_max_pct": 0})
     assert all(c["label"].startswith("QoS Buruk") or c["id_klaster"] == -1 for c in tight["clusters"])
     # statistik, boxplot, dan jumlah anggota tidak berubah
     for old, new in zip(doc["clusters"], loose["clusters"]):
@@ -139,7 +139,7 @@ def test_relabel_version_membuat_versi_baru_tanpa_refit(active_cfg):
     old_name = active_cfg["_active"]
     before_old = digest(root / old_name)
     before_current = (root / "current.txt").read_text("utf-8")
-    new_th = {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 1e9, "loss_max_pct": 1e9}
+    new_th = {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 1e9, "loss_good_pct": 1e9, "loss_max_pct": 1e9}
 
     out = relabel_version(active_cfg, old_name, new_th)
 
@@ -152,7 +152,7 @@ def test_relabel_version_membuat_versi_baru_tanpa_refit(active_cfg):
     doc = json.loads((out / "cluster_profile.json").read_text("utf-8"))
     assert doc["model_version"] == out.name and doc["thresholds"]["loss_max_pct"] == 1e9
     meta = json.loads((out / "train_meta.json").read_text("utf-8"))
-    assert meta["relabeled_from"] == old_name and meta["thresholds_sebelum"]["loss_max_pct"] == 0.1
+    assert meta["relabeled_from"] == old_name and meta["thresholds_sebelum"]["loss_max_pct"] == 3.0
     old_doc = json.loads((root / old_name / "cluster_profile.json").read_text("utf-8"))
     assert label_changes(old_doc, doc)["berubah"].any()
 
@@ -257,7 +257,7 @@ def test_apply_overrides_tidak_mengubah_config_asli(iso_cfg):
                                     "thresholds": {"loss_max_pct": 1.0}})
     assert (out["hdbscan"]["min_cluster_size"], out["hdbscan"]["min_samples"]) == (9, 3)
     assert out["hdbscan"]["grid_search"]["enabled"] is False and out["thresholds"]["loss_max_pct"] == 1.0
-    assert iso_cfg["thresholds"]["loss_max_pct"] == 0.1 and iso_cfg["hdbscan"]["min_cluster_size"] == 5
+    assert iso_cfg["thresholds"]["loss_max_pct"] == 3.0 and iso_cfg["hdbscan"]["min_cluster_size"] == 5
 
 
 def test_retrain_log_tidak_menimpa_dan_tidak_mengaktifkan(active_cfg):

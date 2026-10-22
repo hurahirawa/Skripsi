@@ -24,9 +24,10 @@ def level_jitter(jitter_ms: pd.Series, thresholds: dict[str, Any]) -> pd.Series:
 
 
 def level_loss(loss_pct: pd.Series, thresholds: dict[str, Any]) -> pd.Series:
-    """L_loss: 1 jika ≤ loss_max_pct, selain itu 3. NaN tetap NaN."""
+    """L_loss: 1 jika ≤ loss_good_pct; 2 jika ≤ loss_max_pct; 3 jika lebih. NaN tetap NaN."""
     lvl = pd.Series(LEVEL_BAD, index=loss_pct.index, dtype="float64")
-    lvl[loss_pct <= thresholds["loss_max_pct"]] = LEVEL_OK
+    lvl[loss_pct <= thresholds["loss_max_pct"]] = LEVEL_MID
+    lvl[loss_pct <= thresholds["loss_good_pct"]] = LEVEL_OK
     return lvl.where(loss_pct.notna())
 
 

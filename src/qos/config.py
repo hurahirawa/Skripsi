@@ -63,6 +63,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "thresholds.delay_good_ms",
     "thresholds.delay_max_ms",
     "thresholds.jitter_max_ms",
+    "thresholds.loss_good_pct",
     "thresholds.loss_max_pct",
     "monitoring.capture_backend",
     "monitoring.bpf_filter",
