@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from qos.monitor.engine import INSUFFICIENT, card_category
+from qos.profiling.labeling import loss_good_pct
 
 LABEL_COLORS: dict[str, str] = {
     "QoS Baik": "#2563EB",
@@ -96,9 +97,11 @@ def labeling_bars(profile: list[dict[str, Any]], thresholds: dict[str, float]) -
         (thresholds["delay_good_ms"], "ambang delay baik", 1),
         (thresholds["delay_max_ms"], "ambang delay maks", 1),
         (thresholds["jitter_max_ms"], "ambang jitter", 2),
-        (thresholds["loss_good_pct"], "ambang loss baik", 3),
+        (loss_good_pct(thresholds), "ambang loss baik", 3),
         (thresholds["loss_max_pct"], "ambang loss maks", 3),
     ):
+        if name == "ambang loss baik" and value == thresholds["loss_max_pct"]:
+            continue  # profil lama (2 level): satu garis saja
         fig.add_hline(y=value, line_dash="dash", line_color="#6B7280", row=1, col=col,
                       annotation_text=f"{name} {value:g}", annotation_font_size=10)
     fig.update_layout(margin={"t": 40, "b": 10})
@@ -135,7 +138,7 @@ def boxplot_fig(profile: list[dict[str, Any]], metric: str, thresholds: dict[str
     values = {
         "delay_ms": [thresholds["delay_good_ms"], thresholds["delay_max_ms"]],
         "jitter_ms": [thresholds["jitter_max_ms"]],
-        "fai_pct": [thresholds["loss_good_pct"], thresholds["loss_max_pct"]],
+        "fai_pct": sorted({loss_good_pct(thresholds), thresholds["loss_max_pct"]}),
     }[metric]
     for value in values:
         fig.add_hline(y=value, line_dash="dash", line_color="#6B7280", annotation_text=f"ambang {value:g} {unit}")

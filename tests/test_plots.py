@@ -104,3 +104,11 @@ def test_boxplot_skala_log_memakai_rentang_nilai_positif():
     assert fig.layout.yaxis.type == "log" and lo < 0.5 and 3 < hi < 4  # terbatas, tidak meledak ke 10^153
     zeros = boxplot_fig(prof, "fai_pct", TH, log=True)  # hanya ambang 0,1 yang positif
     assert zeros.layout.yaxis.type == "log" and zeros.layout.yaxis.range is not None
+
+
+def test_plot_profil_lama_tanpa_loss_good():
+    old = {k: v for k, v in TH.items() if k != "loss_good_pct"}
+    fig = labeling_bars(PROFILE, old)
+    ys = sorted(s["y0"] for s in fig.layout.shapes)
+    assert ys == sorted([old["delay_good_ms"], old["delay_max_ms"], old["jitter_max_ms"], old["loss_max_pct"]])
+    assert boxplot_fig(PROFILE, "fai_pct", old).layout.shapes[0]["y0"] == old["loss_max_pct"]

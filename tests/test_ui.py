@@ -291,3 +291,49 @@ def test_ui_latih_ulang_dan_aktivasi_dinonaktifkan_saat_monitoring(restore_activ
     assert not at.exception, [e.value for e in at.exception]
     assert _btn(at, "Latih Ulang Model").disabled
     assert any("Monitoring sedang berjalan" in w.value for w in at.warning)
+
+
+# ---- Kompatibilitas versi lama (profil tanpa loss_good_pct) ---------------------------------------
+def _versi_lama_terisolasi(tmp_path, monkeypatch, env, source: Path | None = None):
+    """Config terisolasi dengan satu versi aktif bergaya 2 level lama (tanpa loss_good_pct)."""
+    import json
+    import shutil
+
+    cfg, _, _ = env
+    c = copy.deepcopy(cfg)
+    c["paths"].update({"artifacts_dir": str(tmp_path / "artifacts"), "reports_dir": str(tmp_path / "reports")})
+    root = Path(c["paths"]["artifacts_dir"])
+    if source is not None:
+        version = source.name
+        shutil.copytree(source, root / version)
+    else:
+        src_root = Path(cfg["paths"]["artifacts_dir"])
+        version = (src_root / "current.txt").read_text("utf-8").strip()
+        shutil.copytree(src_root / version, root / version)
+    (root / "current.txt").write_text(version, encoding="utf-8")
+    prof_path = root / version / "cluster_profile.json"
+    prof = json.loads(prof_path.read_text("utf-8"))
+    prof["thresholds"].pop("loss_good_pct", None)
+    prof_path.write_text(json.dumps(prof), encoding="utf-8")
+    c["thresholds"]["loss_good_pct"] = c["thresholds"]["loss_max_pct"]  # tampilan default_th lama
+    conf = tmp_path / "default_config.yaml"
+    conf.write_text(yaml.safe_dump(c), encoding="utf-8")
+    monkeypatch.setenv("QOS_CONFIG", str(conf))
+    return c
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_versi_lama_tanpa_loss_good_semua_halaman_jalan(page, tmp_path, monkeypatch, env):
+    _versi_lama_terisolasi(tmp_path, monkeypatch, env)
+    at = run(page)
+    assert not at.exception, [e.value for e in at.exception]
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_versi_nyata_20261019_204042_semua_halaman_jalan(page, tmp_path, monkeypatch, env):
+    real = Path(__file__).resolve().parents[1] / "artifacts" / "20261019_204042"
+    if not real.is_dir():
+        pytest.skip("artefak 20261019_204042 tidak ada (artifacts/ tidak di-commit)")
+    _versi_lama_terisolasi(tmp_path, monkeypatch, env, source=real)
+    at = run(page)
+    assert not at.exception, [e.value for e in at.exception]

@@ -8,6 +8,7 @@ import yaml
 import ui
 from qos.model.retrain import InsufficientDataError, RetrainError, load_log_frame, retrain
 from qos.model.versions import VersionError, activate_version, label_changes, list_versions, relabel_version
+from qos.profiling.labeling import loss_good_pct
 
 st.set_page_config(page_title="Pengaturan Parameter", page_icon="⚙️", layout="wide")
 cfg = ui.get_cfg()
@@ -30,7 +31,7 @@ st.warning(
     "Perubahan ambang ITU di sini hanya untuk **eksplorasi**. Hasil skripsi memakai ambang default "
     "(ITU-T G.114 untuk delay; ITU-T Y.1541 Kelas 0/1 untuk jitter; ITU-T G.1010 dan panduan Cisco VoIP untuk packet loss): "
     f"delay {default_th['delay_good_ms']:g}/{default_th['delay_max_ms']:g} ms, "
-    f"jitter {default_th['jitter_max_ms']:g} ms, loss {default_th['loss_good_pct']:g}/{default_th['loss_max_pct']:g}%."
+    f"jitter {default_th['jitter_max_ms']:g} ms, loss {loss_good_pct(default_th):g}/{default_th['loss_max_pct']:g}%."
 )
 d1, d2, d3, d4, d5 = st.columns(5)
 delay_good = d1.number_input("Delay baik (ms)", min_value=0.0, value=float(t["delay_good_ms"]))

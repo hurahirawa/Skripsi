@@ -59,3 +59,8 @@ def test_noise_tabel_2_3_tanpa_tingkat(d, j, l):
     label = label_cluster({"delay": d, "jitter": j, "loss": l}, noise=True)[0]
     assert label.startswith("Anomali")
     assert "QoS" not in label and "Meningkat" not in label and "Melebihi" not in label
+
+
+def test_profil_lama_tanpa_loss_good_pakai_dua_level():
+    old = {k: v for k, v in TH.items() if k != "loss_good_pct"}
+    assert level_loss(pd.Series([0.0, old["loss_max_pct"], old["loss_max_pct"] + 0.01]), old).tolist() == [1, 1, 3]
