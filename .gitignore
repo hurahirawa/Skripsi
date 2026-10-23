@@ -1,0 +1,20 @@
+# Lingkungan & cache Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Data & capture (besar, tidak di-commit)
+data/raw/
+data/sample_pcap/
+*.pcap
+*.pcapng
+
+# Keluaran yang dihasilkan
+artifacts/
+reports/
+logs/
+
+# Konfigurasi lokal pengguna
+config/user_config.yaml

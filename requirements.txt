@@ -1,0 +1,15 @@
+pandas
+numpy
+scikit-learn
+hdbscan
+joblib
+pyyaml
+psutil
+pyshark
+scapy
+streamlit>=1.37
+plotly
+matplotlib
+fpdf2
+pytest
+pywebview
