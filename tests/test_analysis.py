@@ -1,0 +1,190 @@
+"""Uji fungsi analisis klasterisasi murni: metrik, siku, pemilihan, centroid, penugasan jarak terdekat, cleaning."""
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+import yaml
+
+from qos.analysis import clustering as cl
+from qos.analysis.data import add_derived, clean_set, iqr_outliers, transform_features
+from qos.config import PROJECT_ROOT
+
+CLEAN_CFG = {"drop_duplicates": True, "drop_negative": True, "nan_strategy": "median", "iqr_factor": 1.5}
+
+
+@pytest.fixture
+def blobs():
+    """Tiga gumpalan terpisah jelas di 2D + label benar."""
+    rng = np.random.default_rng(0)
+    centers = np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]])
+    X = np.vstack([c + rng.normal(0, 0.3, (40, 2)) for c in centers])
+    return X, np.repeat([0, 1, 2], 40)
+
+
+def test_compute_metrics_gumpalan_terpisah(blobs):
+    X, y = blobs
+    m = cl.compute_metrics(X, y)
+    assert m["n_clusters"] == 3 and m["noise_ratio"] == 0
+    assert m["silhouette"] > 0.9 and m["davies_bouldin"] < 0.2 and m["calinski_harabasz"] > 1000
+    assert m["dbcv"] > 0.5
+
+
+def test_compute_metrics_noise_diabaikan_dan_rasio(blobs):
+    X, y = blobs
+    y2 = y.copy()
+    y2[:6] = cl.NOISE
+    m = cl.compute_metrics(X, y2)
+    assert m["noise_ratio"] == pytest.approx(6 / 120) and m["n_clusters"] == 3
+    ref = cl.compute_metrics(X[6:], y[6:])
+    assert m["silhouette"] == pytest.approx(ref["silhouette"])  # metrik hanya pada titik non-noise
+
+
+def test_compute_metrics_kurang_dari_dua_klaster_nan(blobs):
+    X, _ = blobs
+    m = cl.compute_metrics(X, np.zeros(len(X), dtype=int))
+    assert np.isnan(m["silhouette"]) and np.isnan(m["dbcv"]) and m["n_clusters"] == 1
+
+
+def test_kneedle_menemukan_siku():
+    k = np.arange(2, 11)
+    inertia = np.array([1000, 500, 200, 150, 130, 120, 112, 106, 100], dtype=float)  # siku di k=4
+    assert cl.kneedle_elbow(k, inertia) == 4
+    assert cl.kneedle_elbow(k, np.linspace(100, 10, 9)) is None  # garis lurus: tidak ada siku
+    assert cl.kneedle_elbow(np.array([2, 3]), np.array([1.0, 0.5])) is None
+
+
+def test_select_kmeans_k_peringkat_dan_seri_k_kecil():
+    sweep = pd.DataFrame(
+        {"k": [2, 3, 4], "silhouette": [0.5, 0.8, 0.8], "davies_bouldin": [1.0, 0.4, 0.4], "calinski_harabasz": [1, 2, 3]}
+    )
+    k, reason = cl.select_kmeans_k(sweep, ["silhouette", "davies_bouldin"])
+    assert k == 3 and "k=3" in reason  # seri antara 3 dan 4 → k lebih kecil
+
+
+def test_select_hdbscan_batas_dan_metrik():
+    grid = pd.DataFrame(
+        {
+            "min_cluster_size": [5, 10, 25, 50], "min_samples": [1, 1, 1, 1], "n_clusters": [4, 1, 3, 3],
+            "noise_ratio": [0.1, 0.1, 0.7, 0.2], "silhouette": [0.5, 0.9, 0.9, 0.4], "dbcv": [0.6, 0.99, 0.95, 0.3],
+        }
+    )
+    best, reason = cl.select_hdbscan(grid, 2, 0.5, "dbcv")
+    assert int(best["min_cluster_size"]) == 5 and "DBCV" in reason  # 10: hanya 1 klaster; 25: noise 70%
+    relaxed, note = cl.select_hdbscan(grid[grid["noise_ratio"] > 0.5], 2, 0.5, "dbcv")
+    assert int(relaxed["min_cluster_size"]) == 25 and "dilonggarkan" in note
+    with pytest.raises(ValueError):
+        cl.select_hdbscan(grid[grid["n_clusters"] < 2], 2, 0.5, "dbcv")
+
+
+def test_centroid_rata_rata_anggota_tanpa_noise(blobs):
+    X, y = blobs
+    y2 = y.copy()
+    y2[0] = cl.NOISE
+    c = cl.centroids(X, y2)
+    assert sorted(c) == [0, 1, 2]
+    assert c[0] == pytest.approx(X[1:40].mean(axis=0))  # titik noise tidak ikut dihitung
+
+
+def test_assign_nearest_euclidean():
+    cents = {1: np.array([0.0, 0.0]), 2: np.array([10.0, 0.0])}
+    labels, dist = cl.assign_nearest(np.array([[1.0, 0.0], [8.0, 0.0], [5.1, 0.0]]), cents)
+    assert labels.tolist() == [1, 2, 2]
+    assert dist[0].tolist() == pytest.approx([1.0, 9.0]) and dist[2, 0] == pytest.approx(5.1)
+    one, _ = cl.assign_nearest(np.array([0.5, 0.0]), cents)  # satu titik (vektor 1D)
+    assert one.tolist() == [1]
+
+
+def test_konsistensi_dan_kmeans_cocok_penuh(blobs):
+    X, y = blobs
+    assert cl.consistency(X, y)["cocok_persen"] == 100.0
+    y2 = y.copy()
+    y2[:5] = cl.NOISE
+    cons = cl.consistency(X, y2)
+    assert cons["n_noise"] == 5 and cons["n_dinilai"] == 115
+
+
+def test_renumber_by_size_noise_tetap():
+    labels = np.array([7, 7, 7, 3, 3, -1, 9])
+    mapping = cl.renumber_by_size(labels)
+    assert mapping == {7: 1, 3: 2, 9: 3, -1: -1}
+    assert cl.apply_mapping(labels, mapping).tolist() == [1, 1, 1, 2, 2, -1, 3]
+
+
+def test_noise_di_assign_ke_centroid_terdekat():
+    X = np.array([[0.0, 0], [0.1, 0], [10, 0], [10.1, 0], [9.0, 0]])
+    out = cl.assign_noise_to_nearest(X, np.array([1, 1, 2, 2, cl.NOISE]))
+    assert out.tolist() == [1, 1, 2, 2, 2]
+
+
+def test_jarak_ke_centroid_sendiri(blobs):
+    X, y = blobs
+    d = cl.distance_to_own_centroid(X, y)
+    assert list(d["klaster"]) == [0, 1, 2] and (d["median"] <= d["p95"]).all() and (d["p95"] <= d["maks"]).all()
+    assert (d["maks"] < 2).all()
+
+
+def test_stabilitas_ari_tinggi_pada_gumpalan_terpisah(blobs):
+    X, y = blobs
+    mean, std = cl.stability_ari(lambda Xs: cl.kmeans_fit(Xs, 3, 5, 42).labels_, X, y, 5, 0.8, 42)
+    assert mean == pytest.approx(1.0) and std == pytest.approx(0.0)
+    again = cl.stability_ari(lambda Xs: cl.kmeans_fit(Xs, 3, 5, 42).labels_, X, y, 5, 0.8, 42)
+    assert again == (mean, std)  # random_state tetap → reprodusibel
+
+
+def test_kmeans_dan_hdbscan_menemukan_tiga_gumpalan(blobs):
+    X, _ = blobs
+    assert cl.compute_metrics(X, cl.kmeans_fit(X, 3, 5, 42).labels_)["n_clusters"] == 3
+    assert cl.hdbscan_fit(X, 10, 5, "eom").labels_.max() + 1 == 3
+    sweep = cl.kmeans_sweep(X, [2, 3, 4], 5, 42)
+    assert list(sweep["k"]) == [2, 3, 4] and sweep["inertia"].is_monotonic_decreasing
+
+
+def _flows():
+    return pd.DataFrame(
+        {
+            "iat_mean_us": [1000.0, 1000.0, 2000.0, np.inf, np.nan, 3000.0],
+            "iat_std_us": [10.0, 10.0, 20.0, 30.0, 40.0, -5.0],
+            "fwd_packets_count": [10, 10, 20, 30, 40, 50],
+            "bwd_packets_count": [9, 9, 25, 0, 40, 50],
+            "protocol": [17, 17, 17, 6, 17, 17],
+            "traffic_type": ["NonVPN", "NonVPN", "Tor", "VPN", "Tor", "VPN"],
+        }
+    )
+
+
+def test_clean_set_tahap_dan_laporan():
+    cfg = {"exclude_traffic_types": [], "min_fwd": 1, "min_bwd": None}
+    df, rep = clean_set(_flows(), cfg, CLEAN_CFG, True)
+    stages = dict(rep["tahap"])
+    assert stages["Buang duplikat"] == 5 and rep["duplikat"] == 1
+    assert rep["negatif_per_kolom"]["iat_std_us"] == 1 and rep["baris_negatif_dibuang"] == 1 and len(df) == 4
+    assert rep["inf_per_kolom"]["iat_mean_us"] == 1 and rep["nan_per_kolom"]["iat_mean_us"] == 1
+    assert rep["baris_diimputasi"] == 2 and not df[["iat_mean_us", "iat_std_us"]].isna().any().any()
+    assert (df["fai_pct"] >= 0).all()  # FAI negatif (25 > 20) di-clip ke 0
+    no_tor, _ = clean_set(_flows(), {**cfg, "exclude_traffic_types": ["Tor"]}, CLEAN_CFG, True)
+    assert "Tor" not in set(no_tor["traffic_type"])
+
+
+def test_fitur_log1p_fai_tidak_di_log():
+    df = add_derived(_flows().iloc[:2], True)
+    out = transform_features(df, ["iat_mean_us", "fai_pct"], ["iat_mean_us"])
+    assert out["iat_mean_us"].iloc[0] == pytest.approx(np.log1p(1000.0))
+    assert out["fai_pct"].iloc[0] == pytest.approx(10.0)  # (10 - 9) / 10 * 100
+    with pytest.raises(ValueError):
+        transform_features(df, ["fai_pct"], ["iat_mean_us"])
+
+
+def test_iqr_outliers():
+    s = pd.Series([1.0] * 20 + [100.0, np.nan])
+    r = iqr_outliers(s, 1.5)
+    assert r["jumlah"] == 1 and r["persen"] == pytest.approx(100 / 21)
+
+
+def test_config_analisis_lengkap_dan_default_tidak_berubah():
+    acfg = yaml.safe_load(Path(PROJECT_ROOT / "config" / "analysis_config.yaml").read_text("utf-8"))["analysis"]
+    assert acfg["random_state"] == 42 and acfg["stability"]["n_bootstrap"] == 50
+    assert sum(1 for s in acfg["sets"] if s.get("primary")) == 1
+    assert {v for s in acfg["sets"] for v in s["feature_variants"]} <= set(acfg["features"])
+    default = yaml.safe_load(Path(PROJECT_ROOT / "config" / "default_config.yaml").read_text("utf-8"))
+    assert "analysis" not in default  # blok analisis terpisah dari config default
