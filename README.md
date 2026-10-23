@@ -156,7 +156,7 @@ Flow sinyal SIP (port di `monitoring.signaling_ports`, default 5060/5061) diberi
 | Home | Ringkasan model aktif dan alur kerja |
 | Dashboard Overview | 5 kartu (Total, Baik, Cukup, Buruk, Anomali), PCA scatter live, bar chart vs ambang ITU, tabel jendela terbaru, rekomendasi sesi berjalan; auto-refresh |
 | Analisis & Evaluasi Klaster | Silhouette (dengan interpretasi), CHI, Noise Ratio, tabel profil, box plot 3 metrik (toggle skala log), sampel data latih |
-| Pengaturan Parameter | Slider HDBSCAN, ambang ITU, Save/Reset, **Terapkan Ulang Pelabelan**, **Latih Ulang Model**, daftar dan aktivasi versi model |
+| Pengaturan Parameter | Slider HDBSCAN, ambang ITU, Save/Reset, **Terapkan Ulang Pelabelan**, **Latih Ulang Model** (aktif setelah centang konfirmasi "Saya mengerti ini membuat versi model baru"), daftar dan aktivasi versi model |
 | Rekomendasi & Ekspor | Alert klaster bermasalah dan sesi Kritis dengan saran mitigasi, riwayat sesi, unduh CSV dan PDF |
 
 Sidebar (semua halaman): versi model aktif, mode Replay PCAP / Live, sumber, Start/Stop. Latih ulang dan pergantian model aktif dinonaktifkan selama monitoring berjalan.

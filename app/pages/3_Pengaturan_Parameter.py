@@ -130,7 +130,8 @@ if source == "log":
 if monitoring:
     st.warning("Monitoring sedang berjalan: pelatihan ulang dinonaktifkan.")
 
-if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not log_ok):
+confirm_retrain = st.checkbox("Saya mengerti ini membuat versi model baru", key="confirm_retrain", disabled=monitoring)
+if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not log_ok or not confirm_retrain):
     bar = st.progress(0.0, text="Melatih model…")
     params = {"min_cluster_size": mcs, "min_samples": ms, "grid_enabled": grid, "thresholds": thresholds}
 

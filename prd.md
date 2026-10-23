@@ -223,7 +223,7 @@ P3 Pengaturan Parameter & Ambang Batas
 
 Slider min_cluster_size 2–50 (default 5), min_samples 1–20 (default 2), toggle grid search otomatis
 Input ambang: delay baik 150, delay maks 400, jitter maks 50, loss baik 1, loss maks 3
-Tombol Save Configuration, Reset to Default, Terapkan Ulang Pelabelan, Latih Ulang Model (disabled saat monitoring; progress bar; setelah selesai tampilkan skor + tombol "Aktifkan model ini")
+Tombol Save Configuration, Reset to Default, Terapkan Ulang Pelabelan, Latih Ulang Model (disabled saat monitoring dan sebelum checkbox "Saya mengerti ini membuat versi model baru" dicentang; progress bar; setelah selesai tampilkan skor + tombol "Aktifkan model ini")
 
 P4 Rekomendasi Mitigasi & Ekspor Laporan
 

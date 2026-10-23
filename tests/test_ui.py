@@ -265,6 +265,8 @@ def test_ui_latih_ulang_dari_log_tidak_mengaktifkan(restore_active):
     at = run("pages/3_Pengaturan_Parameter.py")
     at.radio(key="retrain_source").set_value("Log monitoring (reports/riwayat)").run()
     assert any("mencukupi" in s.value for s in at.success)
+    assert _btn(at, "Latih Ulang Model").disabled  # butuh konfirmasi dulu
+    at.checkbox(key="confirm_retrain").check().run()
     _btn(at, "Latih Ulang Model").click().run()
     assert not at.exception, [e.value for e in at.exception]
     res = at.session_state["retrain_result"]
@@ -337,3 +339,11 @@ def test_versi_nyata_20261019_204042_semua_halaman_jalan(page, tmp_path, monkeyp
     _versi_lama_terisolasi(tmp_path, monkeypatch, env, source=real)
     at = run(page)
     assert not at.exception, [e.value for e in at.exception]
+
+
+def test_ui_latih_ulang_butuh_konfirmasi(restore_active):
+    at = run("pages/3_Pengaturan_Parameter.py")
+    assert at.checkbox(key="confirm_retrain").label == "Saya mengerti ini membuat versi model baru"
+    assert _btn(at, "Latih Ulang Model").disabled
+    at.checkbox(key="confirm_retrain").check().run()
+    assert not _btn(at, "Latih Ulang Model").disabled
