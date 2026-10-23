@@ -19,11 +19,11 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from qos.capture.flow_table import FlowEnd, WindowAggregator, WindowFlow
+from qos.capture.flow_table import FlowEnd, WindowAggregator, WindowFlow, flow_ports
 from qos.config import resolve_path
 from qos.features.extract import derive_metrics
 from qos.features.preprocess import build_features, impute_median
-from qos.monitor.calls import CALL_COLUMNS, INSUFFICIENT, CallTracker, count_final_labels
+from qos.monitor.calls import CALL_COLUMNS, INSUFFICIENT, SIGNALING, CallTracker, count_final_labels
 from qos.profiling.labeling import (
     ACTIONS,
     CATEGORY_ANOMALI,
@@ -124,6 +124,7 @@ class InferenceEngine:
         self.art, self.cfg = art, cfg
         self.labels, self.actions, self.causes = art.labels, art.actions, art.causes
         self.n_insufficient = 0  # baris "Data Belum Cukup"
+        self.signaling_ports = {int(p) for p in self.cfg["monitoring"].get("signaling_ports") or []}
 
     def predict(self, flows: list[WindowFlow], session_id: str) -> pd.DataFrame:
         """Prediksi klaster dan label tiap WindowFlow; kolom sesuai WINDOW_COLUMNS."""
@@ -132,8 +133,9 @@ class InferenceEngine:
         feat, meta = self.cfg["features"], self.art.meta
         live = self.cfg["monitoring"]["min_session_live"]
         min_fwd, min_bwd = max(live["fwd"] or 0, 1), live["bwd"] or 0  # fwd = 0 membuat FAI tak terdefinisi
-        enough = np.array([f.fwd >= min_fwd and f.bwd >= min_bwd for f in flows])
-        self.n_insufficient += int((~enough).sum())
+        signaling = np.array([bool(self.signaling_ports.intersection(flow_ports(f.flow_id))) for f in flows])
+        enough = np.array([f.fwd >= min_fwd and f.bwd >= min_bwd for f in flows]) & ~signaling
+        self.n_insufficient += int((~enough & ~signaling).sum())
 
         fwd = np.array([f.fwd for f in flows], dtype=float)
         bwd = np.array([f.bwd for f in flows], dtype=float)
@@ -163,6 +165,7 @@ class InferenceEngine:
                 "diimputasi": False,  # baris tanpa prediksi tidak diimputasi
             }
         )
+        out.loc[signaling, "label"] = SIGNALING  # flow sinyal: nilai mentah dicatat, tanpa prediksi
         if not enough.any():
             return out[list(WINDOW_COLUMNS)]
 
@@ -201,8 +204,8 @@ class InferenceEngine:
 
 def card_category(label: str) -> str:
     """Kategori kartu dari label: QoS Baik / Cukup / Buruk / Anomali, atau "Data Belum Cukup"."""
-    if label == INSUFFICIENT:
-        return INSUFFICIENT
+    if label in (INSUFFICIENT, SIGNALING):
+        return label
     for key in CARD_KEYS:
         if label.startswith(key):
             return key
@@ -258,6 +261,7 @@ class MonitoringSession:
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._last_label: dict[str, str] = {}
+        self._signaling: set[str] = set()  # flow sinyal: tidak masuk kartu, status, panggilan
         self._finished = False
 
     # ---- kontrol ----
@@ -294,11 +298,13 @@ class MonitoringSession:
         """Hitung flow unik berdasarkan label terakhir: total, 4 kategori, dan "Data Belum Cukup"."""
         with self._lock:
             labels = list(self._last_label.values())
+            n_signaling = len(self._signaling)
         counts = Counter(card_category(v) for v in labels)
         return {
             "Total Aliran Trafik": len(labels),
             **{k: counts.get(k, 0) for k in CARD_KEYS},
             INSUFFICIENT: counts.get(INSUFFICIENT, 0),
+            SIGNALING: n_signaling,
         }
 
     def drain(self) -> list[pd.DataFrame]:
@@ -353,9 +359,12 @@ class MonitoringSession:
             return
         df.to_csv(self.window_csv, mode="a", header=not self.window_csv.exists(), index=False)  # MON-7
         with self._lock:
-            self._last_label.update(dict(zip(df["flow_id"], df["label"])))
+            is_sig = df["label"] == SIGNALING
+            self._signaling.update(df.loc[is_sig, "flow_id"])
+            scored = df[~is_sig]
+            self._last_label.update(dict(zip(scored["flow_id"], scored["label"])))
             self.n_windows_rows += len(df)
-            self._tracker.update(df)
+            self._tracker.update(scored)
         self.results.put(df)
 
     def _emit_calls(self, ends: list[FlowEnd]) -> None:

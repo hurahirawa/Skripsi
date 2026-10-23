@@ -18,7 +18,8 @@ from qos.capture import sniffer  # noqa: E402
 from qos.capture.sniffer import LIVE_BACKENDS, CaptureError, iter_pcap  # noqa: E402
 from qos.recommend.rules import load_rules  # noqa: E402
 from qos.config import DEFAULT_CONFIG_PATH, USER_CONFIG_NAME, load_config, resolve_path, setup_logging  # noqa: E402
-from qos.monitor.calls import call_title  # noqa: E402
+from qos.monitor.calls import call_title, call_toast_message  # noqa: E402
+from qos.viz.plots import style_by_label  # noqa: E402
 from qos.monitor.engine import (  # noqa: E402
     Artifacts,
     InferenceEngine,
@@ -117,11 +118,32 @@ def drain_calls() -> pd.DataFrame:
     if session is not None:
         batches = session.drain_calls()
         if batches:
-            for row in pd.concat(batches, ignore_index=True).itertuples():
-                st.toast(f"Panggilan {call_title(row.flow_id)} selesai: {row.label_akhir}", icon="📞")
-            calls = pd.concat([calls, *batches], ignore_index=True)
+            new = pd.concat(batches, ignore_index=True)
+            st.toast(call_toast_message(new), icon="📞")  # satu toast per siklus refresh
+            calls = pd.concat([calls, new], ignore_index=True)
             st.session_state["live_calls"] = calls
     return calls
+
+
+COMPACT_CALL_COLUMNS = ["waktu_selesai", "pasangan", "durasi_s", "label_akhir", "label_terburuk"]
+CALL_COLUMN_CONFIG = {
+    "waktu_selesai": st.column_config.TextColumn("Selesai", width=145),
+    "pasangan": st.column_config.TextColumn("Pasangan alamat", width=165, help="flow_id lengkap ada di Detail"),
+    "durasi_s": st.column_config.NumberColumn("Durasi (s)", format="%.1f", width=70),
+    "label_akhir": st.column_config.TextColumn("Label akhir", width=320),
+    "label_terburuk": st.column_config.TextColumn("Label terburuk", width=320),
+}
+
+
+def show_calls_table(calls: pd.DataFrame, newest_first: bool = True) -> None:
+    """Tabel panggilan ringkas berwarna menurut label_akhir; kolom lengkap di expander "Detail"."""
+    shown = calls.iloc[::-1] if newest_first else calls
+    compact = shown.assign(pasangan=shown["flow_id"].map(call_title))[COMPACT_CALL_COLUMNS]
+    st.dataframe(
+        style_by_label(compact, "label_akhir"), column_config=CALL_COLUMN_CONFIG, width="stretch", hide_index=True
+    )
+    with st.expander("Detail"):
+        st.dataframe(shown, width="stretch", hide_index=True)
 
 
 def list_sample_pcaps(cfg: dict) -> list[Path]:

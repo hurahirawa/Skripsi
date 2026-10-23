@@ -140,6 +140,13 @@ python scripts/live_capture.py --backend scapy --interface "Wi-Fi" --seconds 30
 streamlit run app/Home.py
 ```
 
+Peluncur lokal (Windows, memakai `.venv`):
+
+- `run_app.bat` — server Streamlit headless dan browser terbuka otomatis (port 8501; ubah dengan `set PORT=...` sebelum menjalankan).
+- `run_desktop.bat` — jendela desktop "VoIP QoS Monitor" (pywebview, butuh WebView2 yang sudah ada di Windows 11); server berhenti saat jendela ditutup. Live capture butuh hak Administrator.
+
+Flow sinyal SIP (port di `monitoring.signaling_ports`, default 5060/5061) diberi label "Sinyal SIP": dicatat di CSV jendela tetapi tidak diprediksi, tidak masuk kartu, status Kritis, ringkasan sesi, tabel panggilan, rekomendasi, maupun latih ulang; dashboard hanya menampilkan jumlahnya. Tabel *Panggilan Selesai* menampilkan kolom ringkas (kolom lengkap di expander *Detail*); beberapa panggilan yang selesai dalam satu siklus refresh digabung menjadi satu toast.
+
 | Halaman | Isi |
 |---|---|
 | Home | Ringkasan model aktif dan alur kerja |
@@ -190,7 +197,7 @@ python -m playwright install chromium
 python scripts/take_screenshots.py [--pcap data/sample_pcap/<berkas>.pcap] [--speed 3]
 ```
 
-Berkas: `01_home`, `02_dashboard_replay`, `03_analisis_klaster`, `03b_analisis_klaster_skala_log`, `04_pengaturan`, `05_rekomendasi_ekspor`, `05b_rekomendasi_riwayat_laporan_sesi`. Tabel riwayat pada tangkapan memuat semua sesi yang ada di `reports/riwayat/`; kosongkan atau pindahkan folder itu lebih dulu bila ingin riwayat yang bersih.
+Berkas: `01_home`, `02_dashboard_replay`, `03_analisis_klaster`, `03b_analisis_klaster_skala_log`, `04_pengaturan`, `05_rekomendasi_ekspor`, `05b_rekomendasi_riwayat_laporan_sesi`, `02b_toast_panggilan_selesai`, `02c_dashboard_panggilan_selesai`, `05c_rekomendasi_panggilan_per_sesi`. Tabel riwayat pada tangkapan memuat semua sesi yang ada di `reports/riwayat/`; kosongkan atau pindahkan folder itu lebih dulu bila ingin riwayat yang bersih.
 
 ## Pengujian
 

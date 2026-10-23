@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from qos.monitor.engine import INSUFFICIENT, card_category
+from qos.monitor.engine import INSUFFICIENT, SIGNALING, card_category
 from qos.profiling.labeling import loss_good_pct
 
 LABEL_COLORS: dict[str, str] = {
@@ -17,6 +17,7 @@ LABEL_COLORS: dict[str, str] = {
     "QoS Buruk": "#F97316",
     "Anomali": "#DC2626",
     INSUFFICIENT: "#9CA3AF",
+    SIGNALING: "#9CA3AF",
 }
 NOISE_ID = -1
 BACKGROUND_OPACITY = 0.15

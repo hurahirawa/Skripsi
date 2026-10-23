@@ -11,6 +11,7 @@ import pandas as pd
 from qos.capture.flow_table import FlowEnd
 
 INSUFFICIENT = "Data Belum Cukup"
+SIGNALING = "Sinyal SIP"  # flow sinyal (monitoring.signaling_ports): bukan panggilan, tidak diprediksi
 CATEGORY_ORDER: tuple[str, ...] = ("QoS Baik", "QoS Cukup", "QoS Buruk", "Anomali")  # urut keparahan naik
 PERCENT_COLUMNS: tuple[str, ...] = (
     "persen_baik", "persen_cukup", "persen_buruk", "persen_anomali", "persen_belum_cukup",
@@ -28,9 +29,9 @@ TIME_PRECISION = "seconds"
 
 
 def category_of(label: str) -> str:
-    """Kategori label: salah satu CATEGORY_ORDER, INSUFFICIENT, atau Anomali untuk label tak dikenal."""
-    if label == INSUFFICIENT:
-        return INSUFFICIENT
+    """Kategori label: salah satu CATEGORY_ORDER, INSUFFICIENT, SIGNALING, atau Anomali untuk label tak dikenal."""
+    if label in (INSUFFICIENT, SIGNALING):
+        return label
     for key in CATEGORY_ORDER[:3]:
         if label.startswith(key):
             return key
@@ -122,3 +123,13 @@ def call_title(flow_id: str) -> str:
     if len(parts) != 3 or any(":" not in p for p in parts[:2]):
         return flow_id
     return " ↔ ".join(p.rsplit(":", 1)[0] for p in parts[:2])
+
+
+def call_toast_message(calls: pd.DataFrame) -> str:
+    """Teks toast untuk panggilan yang baru selesai: satu panggilan → rinci; lebih → satu toast gabungan per kategori."""
+    if len(calls) == 1:
+        row = calls.iloc[0]
+        return f"Panggilan {call_title(row['flow_id'])} selesai: {row['label_akhir']}"
+    counts = count_final_labels(calls)
+    parts = ", ".join(f"{n} {k}" for k, n in counts.items() if n)
+    return f"{len(calls)} panggilan selesai: {parts}"

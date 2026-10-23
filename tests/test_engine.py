@@ -360,3 +360,55 @@ def test_worst_label_dan_call_title():
     assert worst_label(Counter({"QoS Baik": 9, "Anomali - X": 1})) == "Anomali - X"
     assert call_title("192.168.1.25:16384-192.168.1.10:16384-17") == "192.168.1.25 ↔ 192.168.1.10"
     assert call_title("aneh") == "aneh"
+
+
+# ---- flow sinyal SIP ----
+from qos.capture.flow_table import flow_ports  # noqa: E402
+from qos.monitor.calls import SIGNALING, call_toast_message  # noqa: E402
+
+
+def test_flow_ports():
+    assert flow_ports("10.0.0.1:5060-10.0.0.2:16384-17") == (5060, 16384)
+    assert flow_ports("aneh") == (0, 0)
+
+
+def test_predict_sinyal_sip_tidak_diprediksi(env):
+    cfg, _ = env
+    eng = InferenceEngine(load_artifacts(cfg), cfg)
+    flows = [
+        WindowFlow("10.0.0.1:5060-10.0.0.2:5060-17", 1000.0, 1005.0, 17, 50, 50, 100, 4.9e6, 10_000.0, 8_000.0),
+        WindowFlow("10.0.0.1:16384-10.0.0.2:5061-17", 1000.0, 1005.0, 17, 50, 50, 100, 4.9e6, 10_000.0, 8_000.0),
+        WindowFlow("10.0.0.1:16384-10.0.0.2:16384-17", 1000.0, 1005.0, 17, 250, 250, 500, 4.9e6, 10_000.0, 8_000.0),
+    ]
+    out = eng.predict(flows, "s").set_index("flow_id")
+    assert list(out["label"].iloc[:2]) == [SIGNALING, SIGNALING]
+    assert out["cluster_id"].iloc[:2].isna().all() and out["kategori_tindakan"].iloc[0] == "-"
+    assert out["label"].iloc[2] != SIGNALING and not pd.isna(out["cluster_id"].iloc[2])
+    assert eng.n_insufficient == 0  # sinyal bukan "Data Belum Cukup"
+    assert card_category(SIGNALING) == SIGNALING
+
+
+def test_sesi_sinyal_sip_dicatat_di_jendela_saja(env):
+    cfg, _ = env
+    sip_a, sip_b = ("10.1.0.1", 5060), ("10.1.0.2", 5060)
+    pkts = sorted(call_packets(CA, CB, 0, 10) + call_packets(sip_a, sip_b, 0, 10), key=lambda p: p.ts)
+    s = call_session(cfg, pkts)
+    s.start()
+    s.wait(60)
+    path = s.stop()
+    rows = pd.read_csv(s.window_csv)
+    assert (rows.loc[rows["flow_id"].str.contains(":5060"), "label"] == SIGNALING).all()
+    assert (rows["flow_id"].str.contains(":5060")).any()  # tetap dicatat di CSV jendela
+    cards = s.card_counts()
+    assert cards["Total Aliran Trafik"] == 1 and cards[SIGNALING] == 1
+    calls = pd.read_csv(s.calls_csv)
+    assert list(calls["flow_id"]) == ["10.1.0.1:4000-10.1.0.2:4000-17"]
+    summary = pd.read_csv(path)
+    assert summary["total_aliran"].iloc[0] == 1 and summary["jumlah_panggilan"].iloc[0] == 1
+
+
+def test_toast_gabungan_dan_tunggal():
+    one = pd.DataFrame({"flow_id": ["192.168.1.25:1-192.168.1.10:2-17"], "label_akhir": ["QoS Baik"]})
+    assert call_toast_message(one) == "Panggilan 192.168.1.25 ↔ 192.168.1.10 selesai: QoS Baik"
+    many = pd.DataFrame({"flow_id": ["a"] * 3, "label_akhir": ["QoS Baik", "QoS Baik", "Anomali - Delay"]})
+    assert call_toast_message(many) == "3 panggilan selesai: 2 QoS Baik, 1 Anomali"

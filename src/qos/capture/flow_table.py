@@ -86,6 +86,15 @@ def make_flow_id(key: tuple[tuple[str, int], tuple[str, int], int]) -> str:
     return f"{ip1}:{p1}-{ip2}:{p2}-{proto}"
 
 
+def flow_ports(flow_id: str) -> tuple[int, int]:
+    """Kedua port dari flow_id `ipA:portA-ipB:portB-proto`; (0, 0) jika format tidak dikenal."""
+    parts = flow_id.split("-")
+    try:
+        return int(parts[0].rsplit(":", 1)[1]), int(parts[1].rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return 0, 0
+
+
 @dataclass
 class _Flow:
     """Keadaan satu flow: kumulatif sejak awal dan per jendela."""

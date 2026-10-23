@@ -6,7 +6,7 @@ import ui
 from qos.monitor.engine import card_category
 from qos.recommend.rules import call_recommendations, cluster_recommendations, session_recommendations
 from qos.report.export import export_session
-from qos.viz.plots import cluster_name, style_by_label
+from qos.viz.plots import cluster_name
 
 st.set_page_config(page_title="Rekomendasi & Ekspor", page_icon="📝", layout="wide")
 cfg = ui.get_cfg()
@@ -69,7 +69,7 @@ st.subheader("Panggilan per sesi")
 if calls.empty:
     st.caption("Belum ada panggilan selesai yang tercatat pada sesi ini.")
 else:
-    st.dataframe(style_by_label(calls, "label_akhir"), width="stretch", hide_index=True)
+    ui.show_calls_table(calls, newest_first=False)
     if "catatan" in calls and calls["catatan"].fillna("").ne("").any():
         st.warning("Sesi berjalan pada mode window: label_akhir berasal dari jendela terakhir; ringkasan yang sah hanya pada mode cumulative.")
     call_recs = call_recommendations(calls, rules)

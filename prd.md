@@ -177,6 +177,9 @@ MON-5 Nilai kosong → median dari artefak latih; scaler TIDAK di-fit ulang
 MON-6 hdbscan.approximate_predict(model, X) → cluster_id + membership_prob; lookup label dari cluster_profile.json; -1 → label Anomali dari profil noise
 MON-7 Tiap baris jendela di-append ke CSV secara real-time
 MON-9 Ringkasan per panggilan (flow): flow dianggap selesai saat idle > min(monitoring.flow_idle_timeout_sec, monitoring.call_end_idle_sec) (call_end_idle_sec default 10 detik, agar panggilan yang ditutup cepat terdeteksi; flow_idle_timeout_sec default 120), atau saat Stop / sumber habis. Saat selesai, satu baris ditulis ke reports/riwayat/panggilan_<id_sesi>.csv (§10.3), ditampilkan di panel "Panggilan Selesai" (tabel terbaru di atas, baris berwarna sesuai label) dan memicu st.toast ("Panggilan A ↔ B selesai: <label_akhir>"). label_akhir = label jendela kumulatif terakhir; flow yang berakhir "Data Belum Cukup" tetap dicatat dengan label_akhir "Data Belum Cukup"; flow tanpa satu pun baris jendela tidak dicatat. Paket yang datang setelah flow selesai memulai flow/panggilan baru. Tidak mengubah model maupun ambang. Pada feature_mode window, nilai dan label_akhir berasal dari jendela terakhir (bukan kumulatif) dan kolom catatan memberi tahu bahwa ringkasan yang sah hanya pada mode cumulative.
+MON-10 Flow sinyal SIP: flow yang salah satu portnya ada di monitoring.signaling_ports (default [5060, 5061]) berstatus "Sinyal SIP": tidak masuk approximate_predict (cluster_id kosong), tidak dihitung di kartu, kritis_ratio, total_aliran dan ringkasan sesi, tidak masuk panggilan_<id_sesi>.csv, tidak mendapat rekomendasi, dan tidak dipakai latih ulang. Tetap dicatat di CSV jendela dengan label "Sinyal SIP"; dashboard menampilkan jumlahnya sebagai catatan kecil. monitoring.min_session_live tidak berubah.
+MON-11 Tampilan panggilan: tabel dashboard dan per sesi menampilkan kolom ringkas (waktu_selesai, pasangan alamat, durasi_s, label_akhir, label_terburuk) berlatar warna label; kolom lengkap di expander "Detail" dan CSV. Jika lebih dari satu panggilan selesai dalam satu siklus refresh, tampil satu toast gabungan ("3 panggilan selesai: 2 QoS Baik, 1 Anomali"); satu panggilan memakai format rinci.
+MON-12 Launcher lokal: run_app.bat (aktifkan .venv, Streamlit headless, buka browser) dan run_desktop.bat → scripts/desktop_app.py (server Streamlit di background, jendela pywebview "VoIP QoS Monitor"; server berhenti saat jendela ditutup).
 MON-8 (M6: tidak ada fallback otomatis antar-backend; backend dipilih eksplisit lewat monitoring.capture_backend) Error jelas di UI jika: tshark tidak ditemukan, izin capture ditolak (butuh Administrator/root), atau tidak ada model aktif
 FR-REC Rekomendasi (rule-based, config/recommendations.yaml)
 
@@ -257,7 +260,7 @@ json
 (statistik & boxplot berisi delay_ms, jitter_ms, fai_pct untuk setiap klaster)
 
 10.3 Riwayat
-reports/riwayat/jendela_<id_sesi>.csv (append tiap jendela): waktu_jendela, id_sesi, flow_id, delay_ms, jitter_ms, fwd, bwd, fai_pct, cluster_id, membership_prob, label, kategori_tindakan, metrik_penyebab, pc1, pc2, feature_mode, diimputasi
+reports/riwayat/jendela_<id_sesi>.csv (append tiap jendela; label "Sinyal SIP" untuk flow sinyal, MON-10): waktu_jendela, id_sesi, flow_id, delay_ms, jitter_ms, fwd, bwd, fai_pct, cluster_id, membership_prob, label, kategori_tindakan, metrik_penyebab, pc1, pc2, feature_mode, diimputasi
 reports/riwayat/panggilan_<id_sesi>.csv (satu baris per panggilan selesai, MON-9): flow_id, waktu_mulai, waktu_selesai, durasi_s, total_fwd, total_bwd, delay_ms, jitter_ms, fai_pct (nilai kumulatif akhir), cluster_id, label_akhir, kategori_tindakan, metrik_penyebab, jumlah_jendela, persen_baik, persen_cukup, persen_buruk, persen_anomali, persen_belum_cukup (persen jendela per kategori; jendela "Data Belum Cukup" dihitung agar jumlahnya 100%), label_terburuk (label kategori tertinggi Baik<Cukup<Buruk<Anomali; seri → paling sering; "Data Belum Cukup" jika tak ada jendela terprediksi), catatan (kosong pada mode cumulative; peringatan pada mode window)
 reports/riwayat/riwayat_pemantauan_<YYYYMMDD_HHMMSS>.csv (ringkasan sesi saat Stop): id_sesi_pemantauan (interface + waktu mulai), waktu_mulai, waktu_selesai, total_aliran, jumlah_klaster, skor_silhouette, skor_chi, noise_ratio, status_keseluruhan, lokasi_laporan, jumlah_panggilan, panggilan_baik, panggilan_cukup, panggilan_buruk, panggilan_anomali, panggilan_belum_cukup (jumlah panggilan per kategori label_akhir)
 jumlah_klaster dan skor_* diambil dari model aktif (hasil pelatihan)
@@ -326,6 +329,7 @@ monitoring:
   window_sec: 5
   flow_idle_timeout_sec: 120
   call_end_idle_sec: 10
+  signaling_ports: [5060, 5061]
   feature_mode: cumulative   # cumulative (default) | window
   min_session_live:
     fwd: 5

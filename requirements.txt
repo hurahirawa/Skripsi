@@ -12,3 +12,4 @@ plotly
 matplotlib
 fpdf2
 pytest
+pywebview

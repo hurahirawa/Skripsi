@@ -16,7 +16,7 @@ import pandas as pd  # noqa: E402
 from fpdf import FPDF  # noqa: E402
 
 from qos.config import resolve_path  # noqa: E402
-from qos.monitor.engine import CARD_KEYS, INSUFFICIENT, card_category  # noqa: E402
+from qos.monitor.engine import CARD_KEYS, INSUFFICIENT, SIGNALING, card_category  # noqa: E402
 from qos.recommend.rules import call_recommendations, session_recommendations  # noqa: E402
 from qos.viz.plots import LABEL_COLORS  # noqa: E402
 
@@ -47,7 +47,9 @@ def category_counts(flows: pd.DataFrame) -> dict[str, int]:
     """Jumlah flow per kategori berdasarkan label terakhir (termasuk Data Belum Cukup)."""
     counts = {k: 0 for k in CATEGORIES}
     for label in flows["label_terakhir"]:
-        counts[card_category(str(label))] += 1
+        cat = card_category(str(label))
+        if cat in counts:  # "Sinyal SIP" tidak dihitung
+            counts[cat] += 1
     return counts
 
 
@@ -82,7 +84,8 @@ def build_session_pdf(
     calls: pd.DataFrame | None = None,
 ) -> bytes:
     """PDF ringkasan sesi: info sesi dan model, distribusi label, rekomendasi, tabel flow, profil klaster."""
-    flows = per_flow_table(rows)
+    n_signaling = rows.loc[rows["label"] == SIGNALING, "flow_id"].nunique() if "label" in rows else 0
+    flows = per_flow_table(rows[rows["label"] != SIGNALING] if "label" in rows else rows)  # sinyal SIP bukan aliran dinilai
     counts = category_counts(flows)
     pdf = FPDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -137,6 +140,9 @@ def build_session_pdf(
     pdf.image(io.BytesIO(distribution_chart(counts)), w=170)
     if counts[INSUFFICIENT]:
         line(f"{counts[INSUFFICIENT]} aliran berstatus 'Data Belum Cukup' dan tidak dihitung sebagai Anomali maupun status Kritis.")
+
+    if n_signaling:
+        line(f"{n_signaling} flow sinyal SIP dicatat di CSV jendela tetapi tidak dinilai dan tidak dihitung.")
 
     heading("Rekomendasi mitigasi")
     recs = session_recommendations(rows, rules)

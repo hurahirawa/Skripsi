@@ -17,7 +17,7 @@ import pandas as pd
 from qos.config import resolve_path
 from qos.features.preprocess import session_mask
 from qos.model.train import COUNT_COLUMNS, load_training_frame, save_artifacts, train
-from qos.monitor.engine import INSUFFICIENT
+from qos.monitor.engine import INSUFFICIENT, SIGNALING
 from qos.profiling.labeling import CATEGORY_ANOMALI
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ def load_log_frame(cfg: dict[str, Any], files: list[Path] | None = None) -> tupl
         if col not in raw.columns:
             raw[col] = np.nan
     counts = {"baris_log": len(raw)}
-    df = raw[raw["label"] != INSUFFICIENT]
+    df = raw[~raw["label"].isin([INSUFFICIENT, SIGNALING])]  # keduanya tanpa fitur valid
     counts["setelah_buang_data_belum_cukup"] = len(df)
     if mode is not None:
         unknown = df["feature_mode"].isna()

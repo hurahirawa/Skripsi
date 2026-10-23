@@ -122,6 +122,7 @@ monitoring:
   flow_idle_timeout_sec: 120   # flow tanpa paket selama ini dianggap selesai dan dibuang dari flow table
   call_end_idle_sec: 10        # panggilan yang ditutup cepat: idle selama ini = panggilan selesai (efektif min dengan flow_idle_timeout_sec)
   feature_mode: cumulative   # cumulative (default) | window
+  signaling_ports: [5060, 5061]   # flow dengan port ini = "Sinyal SIP": tidak diprediksi, bukan panggilan
   min_packets_per_window: 10
   min_session_live:          # flow/jendela di bawah ini tidak diprediksi ("Data Belum Cukup"); null = nonaktif
     fwd: 5

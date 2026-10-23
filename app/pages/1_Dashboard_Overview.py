@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from qos.recommend.rules import session_recommendations
-from qos.viz.plots import labeling_bars, pca_scatter, style_by_label
+from qos.viz.plots import labeling_bars, pca_scatter
 
 st.set_page_config(page_title="Dashboard Overview", page_icon="📊", layout="wide")
 cfg = ui.get_cfg()
@@ -19,10 +19,6 @@ if st.session_state.get("session") is None and not len(st.session_state.get("liv
 background = pd.read_csv(
     ui.resolve_path(cfg["paths"]["artifacts_dir"]) / art.version / "training_sample.csv", usecols=["pc1", "pc2", "cluster_id"]
 )
-CALL_COLUMNS = [
-    "waktu_selesai", "flow_id", "durasi_s", "total_fwd", "total_bwd", "delay_ms", "jitter_ms", "fai_pct", "label_akhir",
-    "label_terburuk", "jumlah_jendela",
-]
 TABLE_COLUMNS = ["waktu_jendela", "flow_id", "delay_ms", "jitter_ms", "fwd", "bwd", "fai_pct", "cluster_id", "label"]
 
 
@@ -38,6 +34,9 @@ def live_view() -> None:
         col.metric(key, counts.get(key, 0))
     if counts.get("Data Belum Cukup"):
         st.caption(f"{counts['Data Belum Cukup']} aliran berstatus *Data Belum Cukup* (tidak dihitung sebagai Anomali).")
+
+    if counts.get("Sinyal SIP"):
+        st.caption(f"{counts['Sinyal SIP']} flow *Sinyal SIP* dicatat tetapi tidak dinilai dan tidak dihitung sebagai panggilan.")
 
     left, right = st.columns(2)
     left.subheader("Sebaran PCA")
@@ -55,8 +54,7 @@ def live_view() -> None:
 
     st.subheader("Panggilan Selesai")
     if len(calls):
-        shown = calls[CALL_COLUMNS].iloc[::-1]  # terbaru di atas
-        st.dataframe(style_by_label(shown, "label_akhir"), width="stretch", hide_index=True)
+        ui.show_calls_table(calls)  # terbaru di atas
     else:
         st.caption(
             f"Belum ada panggilan selesai (panggilan selesai setelah idle {cfg['monitoring']['call_end_idle_sec']} detik atau saat Stop)."
