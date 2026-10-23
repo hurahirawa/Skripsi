@@ -180,6 +180,8 @@ MON-9 Ringkasan per panggilan (flow): flow dianggap selesai saat idle > min(moni
 MON-10 Flow sinyal SIP: flow yang salah satu portnya ada di monitoring.signaling_ports (default [5060, 5061]) berstatus "Sinyal SIP": tidak masuk approximate_predict (cluster_id kosong), tidak dihitung di kartu, kritis_ratio, total_aliran dan ringkasan sesi, tidak masuk panggilan_<id_sesi>.csv, tidak mendapat rekomendasi, dan tidak dipakai latih ulang. Tetap dicatat di CSV jendela dengan label "Sinyal SIP"; dashboard menampilkan jumlahnya sebagai catatan kecil. monitoring.min_session_live tidak berubah.
 MON-11 Tampilan panggilan: tabel dashboard dan per sesi menampilkan kolom ringkas (waktu_selesai, pasangan alamat, durasi_s, label_akhir, label_terburuk) berlatar warna label; kolom lengkap di expander "Detail" dan CSV. Jika lebih dari satu panggilan selesai dalam satu siklus refresh, tampil satu toast gabungan ("3 panggilan selesai: 2 QoS Baik, 1 Anomali"); satu panggilan memakai format rinci.
 MON-12 Launcher lokal: run_app.bat (aktifkan .venv, Streamlit headless, buka browser) dan run_desktop.bat → scripts/desktop_app.py (server Streamlit di background, jendela pywebview "VoIP QoS Monitor"; server berhenti saat jendela ditutup).
+MON-13 Indikator live (Dashboard, paling atas, st.fragment run_every=refresh_sec): (a) banner "Status Koneksi Saat Ini" berwarna = label terparah (Baik<Cukup<Buruk<Anomali) di antara panggilan aktif pada jendela terakhir; "Data Belum Cukup" bila belum ada prediksi, "Menunggu data" bila tak ada panggilan aktif; (b) status capture: paket tertangkap, flow aktif, waktu paket terakhir, dan peringatan jika sesi berjalan > 2×window_sec tanpa paket (interface salah / BPF / izin); (c) panel "Panggilan Aktif": satu kartu per flow aktif (bukan Sinyal SIP) berisi pasangan alamat, durasi berjalan, badge label jendela terbaru, delay/jitter/FAI terkini, dan sparkline kategori per jendela (monitoring.sparkline_windows). Panggilan hilang dari panel saat selesai (MON-9). Interface bawaan di sidebar = interface pertama yang aktif dan punya IPv4 non-link-local; interface tidak aktif diberi keterangan.
+MON-14 Sesi terputus: ringkasan sesi selalu tertulis. Tanpa Stop (aplikasi ditutup, error capture) ringkasan ditulis dengan status_keseluruhan "Dihentikan tidak normal" (atexit / error worker; skor model dari ringkasan normal tidak tersedia pada pemulihan). Jika proses dimatikan paksa (tak ada atexit), CSV jendela tanpa ringkasan yang tak berubah selama monitoring.orphan_after_sec diberi ringkasan abnormal saat aplikasi dibuka berikutnya. Halaman Rekomendasi & Ekspor memilih sesi terbaru otomatis dan menjelaskan sesi tanpa data jendela; halaman Analisis & Evaluasi Klaster memberi keterangan bahwa halamannya untuk evaluasi model dengan tautan ke hasil sesi.
 MON-8 (M6: tidak ada fallback otomatis antar-backend; backend dipilih eksplisit lewat monitoring.capture_backend) Error jelas di UI jika: tshark tidak ditemukan, izin capture ditolak (butuh Administrator/root), atau tidak ada model aktif
 FR-REC Rekomendasi (rule-based, config/recommendations.yaml)
 
@@ -264,7 +266,7 @@ reports/riwayat/jendela_<id_sesi>.csv (append tiap jendela; label "Sinyal SIP" u
 reports/riwayat/panggilan_<id_sesi>.csv (satu baris per panggilan selesai, MON-9): flow_id, waktu_mulai, waktu_selesai, durasi_s, total_fwd, total_bwd, delay_ms, jitter_ms, fai_pct (nilai kumulatif akhir), cluster_id, label_akhir, kategori_tindakan, metrik_penyebab, jumlah_jendela, persen_baik, persen_cukup, persen_buruk, persen_anomali, persen_belum_cukup (persen jendela per kategori; jendela "Data Belum Cukup" dihitung agar jumlahnya 100%), label_terburuk (label kategori tertinggi Baik<Cukup<Buruk<Anomali; seri → paling sering; "Data Belum Cukup" jika tak ada jendela terprediksi), catatan (kosong pada mode cumulative; peringatan pada mode window)
 reports/riwayat/riwayat_pemantauan_<YYYYMMDD_HHMMSS>.csv (ringkasan sesi saat Stop): id_sesi_pemantauan (interface + waktu mulai), waktu_mulai, waktu_selesai, total_aliran, jumlah_klaster, skor_silhouette, skor_chi, noise_ratio, status_keseluruhan, lokasi_laporan, jumlah_panggilan, panggilan_baik, panggilan_cukup, panggilan_buruk, panggilan_anomali, panggilan_belum_cukup (jumlah panggilan per kategori label_akhir)
 jumlah_klaster dan skor_* diambil dari model aktif (hasil pelatihan)
-status_keseluruhan: "Kritis" jika proporsi (QoS Buruk + Anomali) > kritis_ratio; selain itu label mayoritas
+status_keseluruhan: "Dihentikan tidak normal" untuk sesi tanpa Stop (MON-14); "Kritis" jika proporsi (QoS Buruk + Anomali) > kritis_ratio; selain itu label mayoritas
 11. config/default_config.yaml
 yaml
 data:
@@ -330,6 +332,9 @@ monitoring:
   flow_idle_timeout_sec: 120
   call_end_idle_sec: 10
   signaling_ports: [5060, 5061]
+  sparkline_windows: 20
+  exit_join_sec: 5
+  orphan_after_sec: 120
   feature_mode: cumulative   # cumulative (default) | window
   min_session_live:
     fwd: 5

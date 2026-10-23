@@ -145,6 +145,10 @@ Peluncur lokal (Windows, memakai `.venv`):
 - `run_app.bat` — server Streamlit headless dan browser terbuka otomatis (port 8501; ubah dengan `set PORT=...` sebelum menjalankan).
 - `run_desktop.bat` — jendela desktop "VoIP QoS Monitor" (pywebview, butuh WebView2 yang sudah ada di Windows 11); server berhenti saat jendela ditutup. Live capture butuh hak Administrator.
 
+Bagian atas Dashboard menampilkan **Status Koneksi Saat Ini** (banner berwarna: label terparah di antara panggilan aktif), status capture (paket, flow aktif, paket terakhir; peringatan bila belum ada paket) dan panel **Panggilan Aktif** (kartu per panggilan dengan label terbaru, delay/jitter/FAI, dan sparkline per jendela). Interface bawaan di sidebar adalah yang aktif dan terhubung; pilih manual bila perlu (mis. *Wi-Fi*, bukan adapter Bluetooth yang tidak aktif — sesi dengan interface mati menghasilkan 0 paket).
+
+Sesi yang berakhir tanpa Stop tetap diringkas dengan status "Dihentikan tidak normal" (saat aplikasi ditutup atau capture error; bila proses dimatikan paksa, ringkasan ditulis saat aplikasi dibuka kembali setelah `monitoring.orphan_after_sec`). Halaman Rekomendasi & Ekspor memilih sesi terbaru otomatis.
+
 Flow sinyal SIP (port di `monitoring.signaling_ports`, default 5060/5061) diberi label "Sinyal SIP": dicatat di CSV jendela tetapi tidak diprediksi, tidak masuk kartu, status Kritis, ringkasan sesi, tabel panggilan, rekomendasi, maupun latih ulang; dashboard hanya menampilkan jumlahnya. Tabel *Panggilan Selesai* menampilkan kolom ringkas (kolom lengkap di expander *Detail*); beberapa panggilan yang selesai dalam satu siklus refresh digabung menjadi satu toast.
 
 | Halaman | Isi |

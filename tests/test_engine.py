@@ -412,3 +412,94 @@ def test_toast_gabungan_dan_tunggal():
     assert call_toast_message(one) == "Panggilan 192.168.1.25 ↔ 192.168.1.10 selesai: QoS Baik"
     many = pd.DataFrame({"flow_id": ["a"] * 3, "label_akhir": ["QoS Baik", "QoS Baik", "Anomali - Delay"]})
     assert call_toast_message(many) == "3 panggilan selesai: 2 QoS Baik, 1 Anomali"
+
+
+# ---- status live, panggilan aktif, sesi terputus ----
+import os  # noqa: E402
+import time  # noqa: E402
+
+from qos.capture.sniffer import default_interface_index  # noqa: E402
+from qos.monitor.engine import STATUS_ABNORMAL, connection_status  # noqa: E402
+from qos.monitor.recover import recover_orphan_sessions  # noqa: E402
+
+
+def test_status_koneksi_label_terparah_dan_menunggu():
+    mk = lambda kat, label: {"kategori": kat, "label": label}  # noqa: E731
+    assert connection_status([]) == ("Menunggu data", "Menunggu data")
+    assert connection_status([mk(INSUFFICIENT, INSUFFICIENT)]) == (INSUFFICIENT, INSUFFICIENT)
+    active = [mk("QoS Baik", "QoS Baik"), mk("QoS Buruk", "QoS Buruk - Jitter"), mk(INSUFFICIENT, INSUFFICIENT)]
+    assert connection_status(active) == ("QoS Buruk - Jitter", "QoS Buruk")
+    assert connection_status(active + [mk("Anomali", "Anomali - X")])[1] == "Anomali"
+
+
+def test_panggilan_aktif_dan_status_capture(env):
+    cfg, _ = env
+    sip = ("10.1.0.9", 5060), ("10.1.0.8", 5060)
+    pkts = sorted(call_packets(CA, CB, 0, 10) + call_packets(*sip, 0, 10), key=lambda p: p.ts)
+    s = call_session(cfg, pkts, hold=True)  # sumber tetap terbuka → panggilan masih aktif
+    assert s.capture_stats()["paket"] == 0 and s.capture_stats()["paket_terakhir"] is None
+    s.start()
+    deadline = time.time() + 20
+    while time.time() < deadline and not s.active_calls():
+        time.sleep(0.1)
+    (call,) = s.active_calls()  # sinyal SIP tidak ikut
+    assert call["flow_id"] == "10.1.0.1:4000-10.1.0.2:4000-17" and call["durasi_s"] > 0
+    assert call["riwayat"] and call["kategori"] == card_category(call["label"])
+    stats = s.capture_stats()
+    assert stats["paket"] == len(pkts) and stats["flow_aktif"] == 2 and stats["detik_sejak_paket"] >= 0
+    s.stop()
+    assert s.active_calls() == []  # Stop menyelesaikan panggilan
+
+
+def test_stop_tidak_normal_lewat_atexit(env):
+    cfg, _ = env
+    s = call_session(cfg, call_packets(CA, CB, 0, 10), hold=True)
+    s.start()
+    s.wait(1.5)
+    s._on_exit()  # simulasi aplikasi ditutup tanpa Stop
+    summary = pd.read_csv(s.summary_path)
+    assert summary["status_keseluruhan"].iloc[0] == STATUS_ABNORMAL
+    assert summary["jumlah_panggilan"].iloc[0] == 1  # panggilan aktif ikut diselesaikan
+    assert s.stop() == s.summary_path  # Stop sesudahnya idempoten
+
+
+def test_error_sumber_menulis_ringkasan_abnormal(env):
+    cfg, _ = env
+
+    def source(stop):
+        yield from call_packets(CA, CB, 0, 10)
+        raise RuntimeError("capture putus")
+
+    c = copy.deepcopy(cfg)
+    s = MonitoringSession(c, InferenceEngine(load_artifacts(c), c), source, "putus")
+    s.start()
+    s.wait(30)
+    assert s.error and pd.read_csv(s.summary_path)["status_keseluruhan"].iloc[0] == STATUS_ABNORMAL
+
+
+def test_pulihkan_sesi_terputus(env, tmp_path):
+    cfg, _ = env
+    c = copy.deepcopy(cfg)
+    c["paths"]["reports_dir"] = str(tmp_path / "reports")
+    folder = tmp_path / "reports" / "riwayat"
+    folder.mkdir(parents=True)
+    rows = pd.DataFrame(
+        {"waktu_jendela": ["2026-10-23T10:00:00"] * 2, "flow_id": ["a", "b"], "label": ["QoS Baik", SIGNALING]}
+    )
+    old, fresh = folder / "jendela_lama.csv", folder / "jendela_baru.csv"
+    rows.to_csv(old, index=False)
+    rows.to_csv(fresh, index=False)
+    past = time.time() - c["monitoring"]["orphan_after_sec"] - 60
+    os.utime(old, (past, past))
+    (path,) = recover_orphan_sessions(c)  # "baru" masih mungkin berjalan → dilewati
+    summary = pd.read_csv(path)
+    assert summary["id_sesi_pemantauan"].iloc[0] == "lama" and summary["total_aliran"].iloc[0] == 1  # sinyal tak dihitung
+    assert summary["status_keseluruhan"].iloc[0] == STATUS_ABNORMAL
+    assert recover_orphan_sessions(c) == []  # sudah punya ringkasan
+    assert recover_orphan_sessions(c, active_ids=["baru"]) == []
+
+
+def test_interface_bawaan_memilih_yang_aktif():
+    names = ["Bluetooth Network Connection", "Ethernet", "Wi-Fi"]
+    assert default_interface_index(names, {"Bluetooth Network Connection": False, "Ethernet": False, "Wi-Fi": True}) == 2
+    assert default_interface_index(names, {}) == 0

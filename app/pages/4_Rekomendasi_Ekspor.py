@@ -42,18 +42,24 @@ if not summaries:
     st.stop()
 
 history = pd.concat([pd.read_csv(p) for p in summaries], ignore_index=True)
+history = history.sort_values(["waktu_mulai", "waktu_selesai"], ascending=False, ignore_index=True)  # terbaru di atas
 st.dataframe(history, width="stretch", hide_index=True)
 
 st.subheader("Laporan sesi")
-chosen = st.selectbox("Sesi", history["id_sesi_pemantauan"])
+chosen = st.selectbox("Sesi (terbaru dipilih otomatis)", history["id_sesi_pemantauan"], index=0)
 summary = history[history["id_sesi_pemantauan"] == chosen].iloc[0].to_dict()
 csv_path = ui.Path(summary["lokasi_laporan"])
 if not csv_path.is_file():
-    st.warning(f"Berkas jendela tidak ditemukan: {csv_path}")
+    st.warning(
+        f"Sesi **{chosen}** tidak punya data jendela ({csv_path.name}): tidak ada paket yang menjadi flow. "
+        "Periksa interface (harus aktif dan terhubung, mis. Wi-Fi), filter BPF, dan izin Npcap/Administrator."
+    )
     st.stop()
 
 rows = pd.read_csv(csv_path)
-if summary["status_keseluruhan"] == "Kritis":
+if summary["status_keseluruhan"] == "Dihentikan tidak normal":
+    st.warning(f"Sesi **{chosen}** dihentikan tidak normal (aplikasi ditutup atau capture terputus tanpa Stop); skor model tidak tercatat.")
+elif summary["status_keseluruhan"] == "Kritis":
     st.error(f"Sesi **{chosen}** berstatus **Kritis**: proporsi aliran QoS Buruk + Anomali melebihi {cfg['monitoring']['kritis_ratio']:.0%}.")
 else:
     st.info(f"Status sesi: **{summary['status_keseluruhan']}**")

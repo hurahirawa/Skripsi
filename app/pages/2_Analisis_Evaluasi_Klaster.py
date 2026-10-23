@@ -14,6 +14,14 @@ th = art.profile["thresholds"]
 ev = art.profile["evaluation"]
 
 st.title("Analisis & Evaluasi Klaster")
+st.info(
+    "Halaman ini untuk **evaluasi model** (skor, profil klaster, box plot), bukan hasil sesi pemantauan. "
+    "Hasil sesi dan panggilan ada di halaman Rekomendasi & Ekspor."
+)
+try:
+    st.page_link("pages/4_Rekomendasi_Ekspor.py", label="Buka Rekomendasi & Ekspor (hasil sesi)", icon="📝")
+except st.errors.StreamlitAPIException:  # halaman dijalankan di luar navigasi multipage (mis. uji AppTest)
+    pass
 c1, c2, c3 = st.columns(3)
 c1.metric("Silhouette", f"{ev['silhouette']:.4f}", ev["silhouette_label"], delta_color="off")
 c2.metric("Calinski-Harabasz", f"{ev['chi']:,.2f}")

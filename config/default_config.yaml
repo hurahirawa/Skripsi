@@ -124,6 +124,9 @@ monitoring:
   feature_mode: cumulative   # cumulative (default) | window
   signaling_ports: [5060, 5061]   # flow dengan port ini = "Sinyal SIP": tidak diprediksi, bukan panggilan
   min_packets_per_window: 10
+  sparkline_windows: 20   # jumlah jendela terakhir pada sparkline kartu panggilan aktif
+  exit_join_sec: 5        # tunggu worker saat aplikasi ditutup tanpa Stop sebelum ringkasan abnormal ditulis
+  orphan_after_sec: 120   # CSV jendela tanpa ringkasan dan tak berubah selama ini dianggap sesi terputus
   min_session_live:          # flow/jendela di bawah ini tidak diprediksi ("Data Belum Cukup"); null = nonaktif
     fwd: 5
     bwd: 5

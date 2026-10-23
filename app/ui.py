@@ -10,6 +10,9 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 import copy  # noqa: E402
+import html  # noqa: E402
+import logging  # noqa: E402
+from datetime import datetime  # noqa: E402
 
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
@@ -19,15 +22,19 @@ from qos.capture.sniffer import LIVE_BACKENDS, CaptureError, iter_pcap  # noqa: 
 from qos.recommend.rules import load_rules  # noqa: E402
 from qos.config import DEFAULT_CONFIG_PATH, USER_CONFIG_NAME, load_config, resolve_path, setup_logging  # noqa: E402
 from qos.monitor.calls import call_title, call_toast_message  # noqa: E402
+from qos.viz.plots import LABEL_COLORS  # noqa: E402
+from qos.monitor.recover import recover_orphan_sessions  # noqa: E402
 from qos.viz.plots import style_by_label  # noqa: E402
 from qos.monitor.engine import (  # noqa: E402
     Artifacts,
     InferenceEngine,
     ModelNotFoundError,
     MonitoringSession,
+    connection_status,
     load_artifacts,
 )
 
+logger = logging.getLogger(__name__)
 CONFIG_ENV = "QOS_CONFIG"          # path config alternatif (dipakai uji)
 MAX_LIVE_ROWS = 20000              # batas baris jendela yang disimpan di memori UI
 MODE_REPLAY, MODE_LIVE = "Replay PCAP", "Live"
@@ -146,6 +153,72 @@ def show_calls_table(calls: pd.DataFrame, newest_first: bool = True) -> None:
         st.dataframe(shown, width="stretch", hide_index=True)
 
 
+WAITING_COLOR = "#6B7280"
+DARK_TEXT_CATEGORIES = ("QoS Cukup", "Data Belum Cukup")  # latar terang → teks gelap
+CARDS_PER_ROW = 3
+SPARK_BLOCK = "■"
+
+
+def _badge(text: str, category: str) -> str:
+    """Badge HTML berwarna menurut kategori label."""
+    color = LABEL_COLORS.get(category, WAITING_COLOR)
+    fg = "#111827" if category in DARK_TEXT_CATEGORIES else "#FFFFFF"
+    return f'<span style="background:{color};color:{fg};padding:2px 10px;border-radius:12px;font-weight:600">{html.escape(text)}</span>'
+
+
+def render_connection_banner(session) -> None:
+    """Banner besar "Status Koneksi Saat Ini": label terparah di antara panggilan aktif pada jendela terakhir."""
+    label, category = connection_status(session.active_calls() if session is not None else [])
+    color = LABEL_COLORS.get(category, WAITING_COLOR)
+    fg = "#111827" if category in DARK_TEXT_CATEGORIES else "#FFFFFF"
+    st.markdown(
+        f'<div style="background:{color};color:{fg};padding:1rem 1.4rem;border-radius:.7rem;margin-bottom:.6rem">'
+        f'<div style="font-size:.9rem;opacity:.85">Status Koneksi Saat Ini</div>'
+        f'<div style="font-size:2.1rem;font-weight:700;line-height:1.2">{html.escape(label)}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_capture_status(cfg: dict, session) -> None:
+    """Status capture kecil (paket, flow aktif, paket terakhir) + peringatan jika berjalan tapi belum ada paket."""
+    if session is None:
+        return
+    s = session.capture_stats()
+    last = s["paket_terakhir"]
+    text = f"Capture: **{s['paket']:,}** paket · **{s['flow_aktif']}** flow aktif · paket terakhir: " + (
+        f"{last:%H:%M:%S} ({s['detik_sejak_paket']:.0f} dtk lalu)" if last else "belum ada"
+    )
+    st.caption(text)
+    elapsed = (datetime.now() - session.started_at).total_seconds()
+    if session.running and not s["paket"] and elapsed > 2 * cfg["monitoring"]["window_sec"]:
+        st.warning(
+            "Belum ada paket tertangkap. Periksa interface (harus aktif dan terhubung), filter BPF, dan izin Npcap/Administrator."
+        )
+
+
+def render_active_calls(session) -> None:
+    """Panel "Panggilan Aktif": satu kartu per flow aktif (bukan Sinyal SIP) dengan sparkline kategori per jendela."""
+    st.subheader("Panggilan Aktif")
+    calls = session.active_calls() if session is not None else []
+    if not calls:
+        st.caption("Tidak ada panggilan aktif.")
+        return
+    for start in range(0, len(calls), CARDS_PER_ROW):
+        for col, call in zip(st.columns(CARDS_PER_ROW), calls[start:start + CARDS_PER_ROW]):
+            with col.container(border=True):
+                st.markdown(f"**{call_title(call['flow_id'])}**")
+                st.markdown(_badge(call["label"], call["kategori"]), unsafe_allow_html=True)
+                st.caption(
+                    f"Durasi {call['durasi_s']:.0f} dtk · delay {call['delay_ms']:.1f} ms · "
+                    f"jitter {call['jitter_ms']:.1f} ms · FAI {call['fai_pct']:.2f}%"
+                )
+                spark = "".join(
+                    f'<span style="color:{LABEL_COLORS.get(c, WAITING_COLOR)}" title="{html.escape(c)}">{SPARK_BLOCK}</span>'
+                    for c in call["riwayat"]
+                )
+                st.markdown(f'<div style="font-size:1.1rem;letter-spacing:2px">{spark}</div>', unsafe_allow_html=True)
+
+
 def list_sample_pcaps(cfg: dict) -> list[Path]:
     """Daftar PCAP di data/sample_pcap."""
     folder = ROOT / "data" / "sample_pcap"
@@ -192,9 +265,19 @@ def _start(
     session.start()
 
 
+def _recover_sessions(cfg: dict) -> None:
+    """Beri ringkasan abnormal pada sesi terputus (CSV jendela tanpa ringkasan), kecuali sesi yang sedang berjalan."""
+    session = st.session_state.get("session")
+    try:
+        recover_orphan_sessions(cfg, [session.session_id] if getattr(session, "session_id", None) else [])
+    except OSError as exc:
+        logger.warning("Pemulihan sesi terputus gagal: %s", exc)
+
+
 def render_sidebar(cfg: dict, art: Artifacts) -> None:
     """Sidebar: versi model, mode, sumber (interface / PCAP), Start/Stop Monitoring."""
     sb = st.sidebar
+    _recover_sessions(cfg)
     sb.caption(f"Model aktif: **{art.version}**")
     mode = sb.radio("Mode capture", [MODE_REPLAY, MODE_LIVE], key="mode", disabled=monitoring_active())
     interface = pcap = None
@@ -205,8 +288,11 @@ def render_sidebar(cfg: dict, art: Artifacts) -> None:
         backend = sb.selectbox(
             "Backend capture", list(LIVE_BACKENDS), index=LIVE_BACKENDS.index(backend), key="backend", disabled=monitoring_active()
         )
+        names = list_interfaces(cfg["monitoring"].get("tshark_path")) or [""]
+        status = sniffer.interface_status()
         interface = sb.selectbox(
-            "Network interface", list_interfaces(cfg["monitoring"].get("tshark_path")) or [""], key="interface",
+            "Network interface", names, index=sniffer.default_interface_index(names, status), key="interface",
+            format_func=lambda n: f"{n} (tidak aktif)" if status and not status.get(n, True) else n,
             disabled=monitoring_active(),
         )
         report = sniffer.check_live_environment(cfg, backend)

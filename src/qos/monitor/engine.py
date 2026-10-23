@@ -1,6 +1,7 @@
 """Mesin inferensi real-time dan sesi pemantauan (PRD MON-5…MON-8, §10.3)."""
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import queue
@@ -8,7 +9,7 @@ import re
 import threading
 import time
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ SUMMARY_COLUMNS: tuple[str, ...] = (
     "panggilan_belum_cukup",
 )
 STATUS_CRITICAL, STATUS_EMPTY = "Kritis", "Tidak ada data"
+STATUS_ABNORMAL = "Dihentikan tidak normal"
 TIME_FORMAT = "%Y%m%d_%H%M%S"
 US_PER_MS = 1000.0
 SESSION_SUFFIX_LEN = 6
@@ -225,6 +227,24 @@ def overall_status(last_labels: dict[str, str], kritis_ratio: float) -> str:
     return Counter(scored.values()).most_common(1)[0][0]
 
 
+SEVERITY: dict[str, int] = {INSUFFICIENT: 0, "QoS Baik": 1, "QoS Cukup": 2, "QoS Buruk": 3, "Anomali": 4}
+STATUS_WAITING = "Menunggu data"
+
+
+def connection_status(active: list[dict[str, Any]]) -> tuple[str, str]:
+    """(label, kategori) status koneksi saat ini: label terparah di antara panggilan aktif pada jendela terbaru.
+
+    Tanpa prediksi: "Data Belum Cukup" bila ada panggilan aktif yang belum cukup data, selain itu "Menunggu data".
+    """
+    scored = [c for c in active if c["kategori"] != INSUFFICIENT]
+    if scored:
+        worst = max(scored, key=lambda c: SEVERITY.get(c["kategori"], -1))
+        return worst["label"], worst["kategori"]
+    if active:
+        return INSUFFICIENT, INSUFFICIENT
+    return STATUS_WAITING, STATUS_WAITING
+
+
 def safe_name(text: str) -> str:
     """Nama aman untuk berkas."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "sesi"
@@ -262,6 +282,11 @@ class MonitoringSession:
         self._lock = threading.RLock()
         self._last_label: dict[str, str] = {}
         self._signaling: set[str] = set()  # flow sinyal: tidak masuk kartu, status, panggilan
+        self.n_packets = 0  # status capture: paket yang masuk ke aggregator
+        self.last_packet_at: float | None = None  # jam dinding paket terakhir
+        self.active_flows = 0
+        self._active: dict[str, dict[str, Any]] = {}  # panggilan aktif: nilai terbaru + riwayat kategori per jendela
+        atexit.register(self._on_exit)  # aplikasi ditutup tanpa Stop → ringkasan "Dihentikan tidak normal"
         self._finished = False
 
     # ---- kontrol ----
@@ -291,7 +316,49 @@ class MonitoringSession:
         with self._lock:
             if self.summary_path is None:
                 self.summary_path = self._write_summary()
+        atexit.unregister(self._on_exit)
         return self.summary_path
+
+    def _on_exit(self) -> None:
+        """Hook atexit: sesi yang belum di-Stop ditutup dan diringkas dengan status abnormal."""
+        if self._thread is None or self.summary_path is not None:
+            return
+        try:
+            self.stop_event.set()
+            self._thread.join(self.cfg["monitoring"]["exit_join_sec"])
+            self._finalize_abnormal()
+        except Exception:  # noqa: BLE001 — jangan ganggu proses keluar
+            logger.exception("Gagal menulis ringkasan sesi %s saat keluar", self.session_id)
+
+    def _finalize_abnormal(self) -> None:
+        with self._lock:
+            if self.summary_path is None:
+                self.summary_path = self._write_summary(STATUS_ABNORMAL)
+
+    # ---- status live untuk dashboard ----
+    def active_calls(self) -> list[dict[str, Any]]:
+        """Panggilan aktif (bukan Sinyal SIP), terparah dulu: nilai jendela terbaru dan riwayat kategori per jendela."""
+        with self._lock:
+            out = [
+                {
+                    "flow_id": fid, "durasi_s": a["last_end"] - a["first_start"], "label": a["label"],
+                    "kategori": card_category(a["label"]), "delay_ms": a["delay_ms"], "jitter_ms": a["jitter_ms"],
+                    "fai_pct": a["fai_pct"], "riwayat": list(a["history"]),
+                }
+                for fid, a in self._active.items()
+            ]
+        return sorted(out, key=lambda c: SEVERITY.get(c["kategori"], -1), reverse=True)
+
+    def capture_stats(self) -> dict[str, Any]:
+        """Status capture: paket tertangkap, flow aktif, dan umur paket terakhir (detik; None jika belum ada)."""
+        with self._lock:
+            last = self.last_packet_at
+            n = self.n_packets
+        return {
+            "paket": n, "flow_aktif": self.active_flows,
+            "paket_terakhir": None if last is None else datetime.fromtimestamp(last),
+            "detik_sejak_paket": None if last is None else max(0.0, time.time() - last),
+        }
 
     # ---- data untuk UI ----
     def card_counts(self) -> dict[str, int]:
@@ -338,11 +405,16 @@ class MonitoringSession:
                 for pkt in source:
                     if self.stop_event.is_set():
                         break
+                    if pkt is not None:
+                        with self._lock:
+                            self.n_packets += 1
+                            self.last_packet_at = time.time()
                     # sumber live mengeluarkan None sebagai detak saat idle → majukan jam dinding
                     done = agg.advance(time.time()) if pkt is None else agg.add(pkt)
                     if done:
                         self._emit(done)
                     self._emit_calls(agg.pop_ended())
+                    self.active_flows = agg.active_flows
             finally:
                 close = getattr(source, "close", None)
                 if close is not None:
@@ -352,6 +424,7 @@ class MonitoringSession:
         except Exception as exc:  # error capture ditampilkan di UI (MON-8)
             logger.exception("Sesi %s gagal", self.session_id)
             self.error = f"{type(exc).__name__}: {exc}"
+            self._finalize_abnormal()  # sesi terputus oleh error: tetap ada di riwayat
 
     def _emit(self, flows: list[WindowFlow]) -> None:
         df = self.engine.predict(flows, self.session_id)
@@ -365,12 +438,27 @@ class MonitoringSession:
             self._last_label.update(dict(zip(scored["flow_id"], scored["label"])))
             self.n_windows_rows += len(df)
             self._tracker.update(scored)
+            self._update_active(flows, df)
         self.results.put(df)
+
+    def _update_active(self, flows: list[WindowFlow], df: pd.DataFrame) -> None:
+        spark = self.cfg["monitoring"]["sparkline_windows"]
+        for f, row in zip(flows, df.to_dict("records")):
+            if row["label"] == SIGNALING:
+                continue
+            a = self._active.setdefault(
+                f.flow_id, {"first_start": f.window_start, "history": deque(maxlen=spark)}
+            )
+            a.update(last_end=f.window_end, label=row["label"], delay_ms=row["delay_ms"],
+                     jitter_ms=row["jitter_ms"], fai_pct=row["fai_pct"])
+            a["history"].append(card_category(row["label"]))
 
     def _emit_calls(self, ends: list[FlowEnd]) -> None:
         if not ends:
             return
         with self._lock:
+            for end in ends:
+                self._active.pop(end.flow_id, None)  # panggilan selesai → bukan aktif lagi
             calls = self._tracker.finish(ends)
             if calls.empty:
                 return
@@ -378,13 +466,13 @@ class MonitoringSession:
             self.n_calls += len(calls)
         self.call_results.put(calls)
 
-    def _write_summary(self) -> Path:
+    def _write_summary(self, status_override: str | None = None) -> Path:
         ended = datetime.now()
         ev = self.engine.art.profile["evaluation"]
         calls = pd.read_csv(self.calls_csv) if self.calls_csv.is_file() else pd.DataFrame(columns=list(CALL_COLUMNS))
         final = count_final_labels(calls)
         with self._lock:
-            status = overall_status(self._last_label, self.cfg["monitoring"]["kritis_ratio"])
+            status = status_override or overall_status(self._last_label, self.cfg["monitoring"]["kritis_ratio"])
             total = len(self._last_label)
         row = {
             "id_sesi_pemantauan": self.session_id,

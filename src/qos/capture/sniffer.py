@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -172,6 +173,30 @@ def list_interfaces(cfg: dict[str, Any]) -> list[str]:
         return sorted(psutil.net_if_addrs())
     except Exception:  # noqa: BLE001 — psutil tak tersedia / dibatasi OS
         return []
+
+
+LINK_LOCAL_PREFIX = "169.254."
+
+
+def interface_status() -> dict[str, bool]:
+    """Nama interface → True bila aktif (up) dan punya IPv4 bukan loopback/link-local (artinya benar-benar terhubung)."""
+    try:
+        import psutil
+
+        stats, addrs = psutil.net_if_stats(), psutil.net_if_addrs()
+    except Exception:  # noqa: BLE001 — psutil tak tersedia / dibatasi OS
+        return {}
+    out = {}
+    for name, items in addrs.items():
+        ips = [a.address for a in items if a.family == socket.AF_INET]
+        usable = [ip for ip in ips if not ip.startswith(LINK_LOCAL_PREFIX) and not ip.startswith("127.")]
+        out[name] = bool(stats.get(name) and stats[name].isup and usable)
+    return out
+
+
+def default_interface_index(names: list[str], status: dict[str, bool]) -> int:
+    """Indeks interface bawaan: interface pertama yang aktif dan terhubung; 0 jika tidak ada."""
+    return next((i for i, n in enumerate(names) if status.get(n)), 0)
 
 
 def explain_error(exc: BaseException, interface: str | None = None) -> str:

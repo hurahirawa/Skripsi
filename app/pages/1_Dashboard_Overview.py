@@ -29,6 +29,9 @@ def live_view() -> None:
     calls = ui.drain_calls()
     session = st.session_state.get("session")
     counts = session.card_counts() if session is not None else {}
+    ui.render_connection_banner(session)
+    ui.render_capture_status(cfg, session)
+    ui.render_active_calls(session)
     cols = st.columns(5)
     for col, key in zip(cols, ["Total Aliran Trafik", "QoS Baik", "QoS Cukup", "QoS Buruk", "Anomali"]):
         col.metric(key, counts.get(key, 0))
