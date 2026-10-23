@@ -125,6 +125,12 @@ def main() -> None:
             shot(page, out, "02_dashboard_replay.png")
 
             page.get_by_text("Replay selesai").wait_for(timeout=REPLAY_FINISH_TIMEOUT_MS)
+            # panggilan ditutup saat sumber habis → toast muncul sebentar; ambil sebelum hilang (tanpa shot() yang menunggu)
+            page.locator('[data-testid="stToast"]').first.wait_for(timeout=15_000)
+            page.screenshot(path=str(out / "02b_toast_panggilan_selesai.png"))
+            print(f"  {out / '02b_toast_panggilan_selesai.png'}")
+            page.get_by_role("heading", name="Panggilan Selesai").wait_for()
+            shot(page, out, "02c_dashboard_panggilan_selesai.png")
             page.get_by_role("button", name="Stop", exact=True).click()
             page.wait_for_timeout(1000)
 
@@ -141,6 +147,7 @@ def main() -> None:
             page.get_by_role("button", name="Unduh PDF ringkasan").wait_for()
             shot(page, out, "05_rekomendasi_ekspor.png")
             shot_section(page, out, "05b_rekomendasi_riwayat_laporan_sesi.png", "Riwayat sesi")
+            shot_section(page, out, "05c_rekomendasi_panggilan_per_sesi.png", "Panggilan per sesi")
             browser.close()
     finally:
         server.terminate()
