@@ -19,10 +19,11 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from qos.capture.flow_table import WindowAggregator, WindowFlow
+from qos.capture.flow_table import FlowEnd, WindowAggregator, WindowFlow
 from qos.config import resolve_path
 from qos.features.extract import derive_metrics
 from qos.features.preprocess import build_features, impute_median
+from qos.monitor.calls import CALL_COLUMNS, INSUFFICIENT, CallTracker, count_final_labels
 from qos.profiling.labeling import (
     ACTIONS,
     CATEGORY_ANOMALI,
@@ -44,9 +45,10 @@ WINDOW_COLUMNS: tuple[str, ...] = (
 SUMMARY_COLUMNS: tuple[str, ...] = (
     "id_sesi_pemantauan", "waktu_mulai", "waktu_selesai", "total_aliran", "jumlah_klaster",
     "skor_silhouette", "skor_chi", "noise_ratio", "status_keseluruhan", "lokasi_laporan",
+    "jumlah_panggilan", "panggilan_baik", "panggilan_cukup", "panggilan_buruk", "panggilan_anomali",
+    "panggilan_belum_cukup",
 )
 STATUS_CRITICAL, STATUS_EMPTY = "Kritis", "Tidak ada data"
-INSUFFICIENT = "Data Belum Cukup"
 TIME_FORMAT = "%Y%m%d_%H%M%S"
 US_PER_MS = 1000.0
 SESSION_SUFFIX_LEN = 6
@@ -247,6 +249,10 @@ class MonitoringSession:
         suffix = uuid.uuid4().hex[:SESSION_SUFFIX_LEN]  # mencegah bentrok ID untuk sesi pada detik yang sama
         self.session_id = f"{safe_name(interface)}_{self.started_at.strftime(TIME_FORMAT)}_{suffix}"
         self.window_csv = reports / f"jendela_{self.session_id}.csv"
+        self.calls_csv = reports / f"panggilan_{self.session_id}.csv"
+        self.call_results: queue.Queue[pd.DataFrame] = queue.Queue()
+        self._tracker = CallTracker(cfg["monitoring"]["feature_mode"])
+        self.n_calls = 0
         self.summary_path: Path | None = None
         self.n_windows_rows = 0
         self._thread: threading.Thread | None = None
@@ -304,11 +310,21 @@ class MonitoringSession:
             except queue.Empty:
                 return out
 
+    def drain_calls(self) -> list[pd.DataFrame]:
+        """Ambil semua baris panggilan selesai yang menunggu di queue."""
+        out = []
+        while True:
+            try:
+                out.append(self.call_results.get_nowait())
+            except queue.Empty:
+                return out
+
     # ---- internal ----
     def _run(self) -> None:
         mon = self.cfg["monitoring"]
         agg = WindowAggregator(
-            mon["window_sec"], mon["feature_mode"], mon["min_packets_per_window"], mon["flow_idle_timeout_sec"]
+            mon["window_sec"], mon["feature_mode"], mon["min_packets_per_window"], mon["flow_idle_timeout_sec"],
+            mon["call_end_idle_sec"],
         )
         try:
             source = self._source(self.stop_event) if callable(self._source) else self._source
@@ -320,11 +336,13 @@ class MonitoringSession:
                     done = agg.advance(time.time()) if pkt is None else agg.add(pkt)
                     if done:
                         self._emit(done)
+                    self._emit_calls(agg.pop_ended())
             finally:
                 close = getattr(source, "close", None)
                 if close is not None:
                     close()  # hentikan sniffer live
             self._emit(agg.flush())
+            self._emit_calls(agg.pop_ended() + agg.end_all())  # akhir sumber / Stop: semua flow tersisa selesai
         except Exception as exc:  # error capture ditampilkan di UI (MON-8)
             logger.exception("Sesi %s gagal", self.session_id)
             self.error = f"{type(exc).__name__}: {exc}"
@@ -337,11 +355,25 @@ class MonitoringSession:
         with self._lock:
             self._last_label.update(dict(zip(df["flow_id"], df["label"])))
             self.n_windows_rows += len(df)
+            self._tracker.update(df)
         self.results.put(df)
+
+    def _emit_calls(self, ends: list[FlowEnd]) -> None:
+        if not ends:
+            return
+        with self._lock:
+            calls = self._tracker.finish(ends)
+            if calls.empty:
+                return
+            calls.to_csv(self.calls_csv, mode="a", header=not self.calls_csv.exists(), index=False)
+            self.n_calls += len(calls)
+        self.call_results.put(calls)
 
     def _write_summary(self) -> Path:
         ended = datetime.now()
         ev = self.engine.art.profile["evaluation"]
+        calls = pd.read_csv(self.calls_csv) if self.calls_csv.is_file() else pd.DataFrame(columns=list(CALL_COLUMNS))
+        final = count_final_labels(calls)
         with self._lock:
             status = overall_status(self._last_label, self.cfg["monitoring"]["kritis_ratio"])
             total = len(self._last_label)
@@ -356,6 +388,12 @@ class MonitoringSession:
             "noise_ratio": ev["noise_ratio"],
             "status_keseluruhan": status,
             "lokasi_laporan": str(self.window_csv),
+            "jumlah_panggilan": len(calls),
+            "panggilan_baik": final["QoS Baik"],
+            "panggilan_cukup": final["QoS Cukup"],
+            "panggilan_buruk": final["QoS Buruk"],
+            "panggilan_anomali": final["Anomali"],
+            "panggilan_belum_cukup": final[INSUFFICIENT],
         }
         path = self.history_dir / f"riwayat_pemantauan_{ended.strftime(TIME_FORMAT)}.csv"
         n = 1

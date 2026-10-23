@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from qos.recommend.rules import session_recommendations
-from qos.viz.plots import labeling_bars, pca_scatter
+from qos.viz.plots import labeling_bars, pca_scatter, style_by_label
 
 st.set_page_config(page_title="Dashboard Overview", page_icon="📊", layout="wide")
 cfg = ui.get_cfg()
@@ -19,6 +19,10 @@ if st.session_state.get("session") is None and not len(st.session_state.get("liv
 background = pd.read_csv(
     ui.resolve_path(cfg["paths"]["artifacts_dir"]) / art.version / "training_sample.csv", usecols=["pc1", "pc2", "cluster_id"]
 )
+CALL_COLUMNS = [
+    "waktu_selesai", "flow_id", "durasi_s", "total_fwd", "total_bwd", "delay_ms", "jitter_ms", "fai_pct", "label_akhir",
+    "label_terburuk", "jumlah_jendela",
+]
 TABLE_COLUMNS = ["waktu_jendela", "flow_id", "delay_ms", "jitter_ms", "fwd", "bwd", "fai_pct", "cluster_id", "label"]
 
 
@@ -26,6 +30,7 @@ TABLE_COLUMNS = ["waktu_jendela", "flow_id", "delay_ms", "jitter_ms", "fwd", "bw
 def live_view() -> None:
     """Auto-refresh: kosongkan queue lalu gambar ulang kartu, scatter, bar chart, dan tabel."""
     rows = ui.drain_session()
+    calls = ui.drain_calls()
     session = st.session_state.get("session")
     counts = session.card_counts() if session is not None else {}
     cols = st.columns(5)
@@ -47,6 +52,15 @@ def live_view() -> None:
                 st.markdown(f"**{r['label']}** — {r['jumlah_flow']} aliran · {r['kategori']}")
                 for s in r["saran"]:
                     st.markdown(f"- {s}")
+
+    st.subheader("Panggilan Selesai")
+    if len(calls):
+        shown = calls[CALL_COLUMNS].iloc[::-1]  # terbaru di atas
+        st.dataframe(style_by_label(shown, "label_akhir"), width="stretch", hide_index=True)
+    else:
+        st.caption(
+            f"Belum ada panggilan selesai (panggilan selesai setelah idle {cfg['monitoring']['call_end_idle_sec']} detik atau saat Stop)."
+        )
 
     st.subheader("Jendela terbaru")
     if len(rows):

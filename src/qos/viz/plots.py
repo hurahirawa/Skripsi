@@ -34,6 +34,16 @@ def label_color(label: str) -> str:
     return LABEL_COLORS[card_category(label)]
 
 
+ROW_TINT_ALPHA = "33"  # hex alpha (~20%) agar teks tetap terbaca di tema terang/gelap
+
+
+def style_by_label(df: pd.DataFrame, label_column: str):
+    """Styler tabel: warna latar tiap baris sesuai kategori label pada `label_column`."""
+    return df.style.apply(
+        lambda row: [f"background-color: {label_color(str(row[label_column]))}{ROW_TINT_ALPHA}"] * len(row), axis=1
+    )
+
+
 def cluster_name(cluster_id: int) -> str:
     """Nama klaster untuk sumbu: `Noise` untuk -1, selain itu `K<id>`."""
     return "Noise" if int(cluster_id) == NOISE_ID else f"K{int(cluster_id)}"

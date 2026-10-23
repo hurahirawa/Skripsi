@@ -17,7 +17,7 @@ from fpdf import FPDF  # noqa: E402
 
 from qos.config import resolve_path  # noqa: E402
 from qos.monitor.engine import CARD_KEYS, INSUFFICIENT, card_category  # noqa: E402
-from qos.recommend.rules import session_recommendations  # noqa: E402
+from qos.recommend.rules import call_recommendations, session_recommendations  # noqa: E402
 from qos.viz.plots import LABEL_COLORS  # noqa: E402
 
 FONT_DIR = Path(matplotlib.get_data_path()) / "fonts" / "ttf"  # DejaVu bawaan matplotlib (Unicode)
@@ -75,7 +75,11 @@ def _fmt(v: Any) -> str:
 
 
 def build_session_pdf(
-    summary: dict[str, Any], rows: pd.DataFrame, rules: dict[str, dict[str, Any]], model_profile: dict[str, Any] | None = None
+    summary: dict[str, Any],
+    rows: pd.DataFrame,
+    rules: dict[str, dict[str, Any]],
+    model_profile: dict[str, Any] | None = None,
+    calls: pd.DataFrame | None = None,
 ) -> bytes:
     """PDF ringkasan sesi: info sesi dan model, distribusi label, rekomendasi, tabel flow, profil klaster."""
     flows = per_flow_table(rows)
@@ -144,6 +148,29 @@ def build_session_pdf(
             line(f"•  {s}")
         pdf.ln(1)
 
+    if calls is not None and len(calls):
+        heading(f"Panggilan selesai (maks {MAX_FLOW_ROWS} dari {len(calls)})")
+        if calls["catatan"].fillna("").ne("").any():
+            line("Catatan: sesi memakai mode window; label_akhir berasal dari jendela terakhir, bukan kumulatif.")
+        table(
+            ["Panggilan", "Durasi s", "Jendela", "Label akhir", "Label terburuk", "Delay ms", "FAI %"],
+            [
+                [r.flow_id, _fmt(float(r.durasi_s)), str(r.jumlah_jendela), r.label_akhir, r.label_terburuk,
+                 _fmt(r.delay_ms), _fmt(r.fai_pct)]
+                for r in calls.head(MAX_FLOW_ROWS).itertuples()
+            ],
+            [44, 14, 14, 42, 42, 18, 16],
+        )
+        call_recs = call_recommendations(calls, rules)
+        heading("Rekomendasi per panggilan bermasalah")
+        if not call_recs:
+            line("Tidak ada panggilan bermasalah.")
+        for r in call_recs:
+            line(f"{r['flow_id']} — {r['label']} ({r['kategori']})", bold=True)
+            for sg in r["saran"]:
+                line(f"•  {sg}")
+            pdf.ln(1)
+
     heading(f"Aliran (maks {MAX_FLOW_ROWS} dari {len(flows)})")
     table(
         ["Flow", "Jendela", "Label terakhir", "Delay ms", "Jitter ms", "FAI %"],
@@ -181,5 +208,11 @@ def export_session(
     sid = str(summary["id_sesi_pemantauan"])
     csv_path, pdf_path = out_dir / f"laporan_{sid}.csv", out_dir / f"laporan_{sid}.pdf"
     shutil.copyfile(window_csv, csv_path)
-    pdf_path.write_bytes(build_session_pdf(summary, rows, rules, model_profile))
-    return {"csv": csv_path, "pdf": pdf_path}
+    calls_csv = window_csv.with_name(window_csv.name.replace("jendela_", "panggilan_", 1))
+    calls = pd.read_csv(calls_csv) if calls_csv.is_file() else None
+    pdf_path.write_bytes(build_session_pdf(summary, rows, rules, model_profile, calls))
+    out = {"csv": csv_path, "pdf": pdf_path}
+    if calls is not None:
+        out["calls_csv"] = out_dir / f"laporan_panggilan_{sid}.csv"
+        shutil.copyfile(calls_csv, out["calls_csv"])
+    return out

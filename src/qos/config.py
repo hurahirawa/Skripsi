@@ -70,6 +70,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "monitoring.live_poll_sec",
     "monitoring.window_sec",
     "monitoring.flow_idle_timeout_sec",
+    "monitoring.call_end_idle_sec",
     "monitoring.feature_mode",
     "monitoring.min_session_live.fwd",
     "monitoring.min_session_live.bwd",

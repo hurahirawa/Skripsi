@@ -119,7 +119,8 @@ monitoring:
   tshark_path: null          # kosong = cari di PATH dan lokasi instalasi Wireshark
   live_poll_sec: 0.5         # detak sumber live saat tidak ada paket (menutup jendela tepat waktu)
   window_sec: 5
-  flow_idle_timeout_sec: 120   # flow tanpa paket selama ini dibuang dari flow table
+  flow_idle_timeout_sec: 120   # flow tanpa paket selama ini dianggap selesai dan dibuang dari flow table
+  call_end_idle_sec: 10        # panggilan yang ditutup cepat: idle selama ini = panggilan selesai (efektif min dengan flow_idle_timeout_sec)
   feature_mode: cumulative   # cumulative (default) | window
   min_packets_per_window: 10
   min_session_live:          # flow/jendela di bawah ini tidak diprediksi ("Data Belum Cukup"); null = nonaktif

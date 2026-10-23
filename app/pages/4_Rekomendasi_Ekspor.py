@@ -4,9 +4,9 @@ import streamlit as st
 
 import ui
 from qos.monitor.engine import card_category
-from qos.recommend.rules import cluster_recommendations, session_recommendations
+from qos.recommend.rules import call_recommendations, cluster_recommendations, session_recommendations
 from qos.report.export import export_session
-from qos.viz.plots import cluster_name
+from qos.viz.plots import cluster_name, style_by_label
 
 st.set_page_config(page_title="Rekomendasi & Ekspor", page_icon="📝", layout="wide")
 cfg = ui.get_cfg()
@@ -62,6 +62,22 @@ if not recs:
     st.success("Tidak ada aliran QoS Buruk atau Anomali pada sesi ini.")
 for rec in recs:
     show_recommendation(rec, f"{rec['jumlah_flow']} aliran")
+
+calls_path = csv_path.with_name(csv_path.name.replace("jendela_", "panggilan_", 1))
+calls = pd.read_csv(calls_path) if calls_path.is_file() else pd.DataFrame()
+st.subheader("Panggilan per sesi")
+if calls.empty:
+    st.caption("Belum ada panggilan selesai yang tercatat pada sesi ini.")
+else:
+    st.dataframe(style_by_label(calls, "label_akhir"), width="stretch", hide_index=True)
+    if "catatan" in calls and calls["catatan"].fillna("").ne("").any():
+        st.warning("Sesi berjalan pada mode window: label_akhir berasal dari jendela terakhir; ringkasan yang sah hanya pada mode cumulative.")
+    call_recs = call_recommendations(calls, rules)
+    for rec in call_recs:
+        show_recommendation(rec, f"Panggilan {rec['flow_id']}")
+    if not call_recs:
+        st.success("Tidak ada panggilan bermasalah pada sesi ini.")
+    st.download_button("Unduh CSV panggilan", calls_path.read_bytes(), file_name=calls_path.name, mime="text/csv")
 
 c1, c2 = st.columns(2)
 c1.download_button("Unduh CSV jendela", csv_path.read_bytes(), file_name=csv_path.name, mime="text/csv")

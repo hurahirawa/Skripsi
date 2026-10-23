@@ -85,3 +85,27 @@ def test_export_session_menulis_csv_dan_pdf(tmp_path, rows):
     assert out["pdf"].read_bytes()[:5] == b"%PDF-"
     with pytest.raises(FileNotFoundError):
         export_session({**summary, "lokasi_laporan": str(tmp_path / "hilang.csv")}, cfg, RULES, PROFILE)
+
+
+def test_rekomendasi_dan_pdf_per_panggilan(rows):
+    from qos.recommend.rules import call_recommendations
+    from qos.viz.plots import style_by_label
+
+    calls = pd.DataFrame(
+        {
+            "flow_id": ["1.1.1.1:1-2.2.2.2:2-17", "3.3.3.3:1-4.4.4.4:2-17"],
+            "durasi_s": [30.0, 12.5],
+            "jumlah_jendela": [6, 3],
+            "label_akhir": ["QoS Baik", "Anomali - Delay Ekstrem"],
+            "label_terburuk": ["QoS Cukup - Jitter", "Anomali - Delay Ekstrem"],
+            "delay_ms": [10.0, 900.0],
+            "fai_pct": [0.0, 5.0],
+            "metrik_penyebab": [float("nan"), "delay"],
+            "catatan": [float("nan"), float("nan")],
+        }
+    )
+    recs = call_recommendations(calls, RULES)
+    assert [r["flow_id"] for r in recs] == ["3.3.3.3:1-4.4.4.4:2-17"]  # hanya panggilan bermasalah
+    assert build_session_pdf({"id_sesi_pemantauan": "s"}, rows, RULES, PROFILE, calls).startswith(b"%PDF")
+    html = style_by_label(calls, "label_akhir").to_html()
+    assert "#2563EB33" in html and "#DC262633" in html

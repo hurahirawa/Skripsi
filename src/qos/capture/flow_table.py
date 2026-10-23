@@ -40,6 +40,15 @@ class WindowFlow:
     iat_std_us: float
 
 
+@dataclass(frozen=True)
+class FlowEnd:
+    """Flow yang dianggap selesai (panggilan berakhir): waktu paket pertama dan terakhir (detik)."""
+
+    flow_id: str
+    first_ts: float
+    last_ts: float
+
+
 class RunningStats:
     """Mean dan simpangan baku sampel (ddof=1) berjalan (Welford)."""
 
@@ -107,17 +116,27 @@ class WindowAggregator:
     Arah forward = pengirim paket pertama flow (seperti CICFlowMeter). IAT = selisih waktu antar paket
     berurutan dalam flow (dua arah); Std memakai ddof=1.
     feature_mode `window`: paket dalam jendela; `cumulative`: sejak awal flow.
-    Flow dengan paket < min_packets dilewati; flow idle > idle_timeout_sec dibuang.
+    Flow dengan paket < min_packets dilewati. Flow dianggap selesai (dibuang dari tabel dan dicatat di `pop_ended`)
+    saat idle > min(idle_timeout_sec, call_end_idle_sec), atau saat `end_all` (Stop / akhir sumber).
     """
 
-    def __init__(self, window_sec: float, feature_mode: str, min_packets: int, idle_timeout_sec: float) -> None:
+    def __init__(
+        self,
+        window_sec: float,
+        feature_mode: str,
+        min_packets: int,
+        idle_timeout_sec: float,
+        call_end_idle_sec: float | None = None,
+    ) -> None:
         if feature_mode not in FEATURE_MODES:
             raise ValueError(f"feature_mode tidak dikenal: {feature_mode!r} (pilihan: {list(FEATURE_MODES)})")
         if window_sec <= 0:
             raise ValueError("window_sec harus > 0")
         self.window_sec, self.feature_mode = float(window_sec), feature_mode
         self.min_packets, self.idle_timeout_sec = min_packets, idle_timeout_sec
+        self.end_idle_sec = idle_timeout_sec if call_end_idle_sec is None else min(idle_timeout_sec, call_end_idle_sec)
         self._flows: dict[tuple, _Flow] = {}
+        self._ended: list[FlowEnd] = []
         self._start: float | None = None
         self.skipped_min_packets = 0
 
@@ -125,6 +144,18 @@ class WindowAggregator:
     def active_flows(self) -> int:
         """Jumlah flow di flow table."""
         return len(self._flows)
+
+    def pop_ended(self) -> list[FlowEnd]:
+        """Ambil (dan kosongkan) daftar flow yang selesai sejak pemanggilan terakhir."""
+        out, self._ended = self._ended, []
+        return out
+
+    def end_all(self) -> list[FlowEnd]:
+        """Akhiri semua flow yang tersisa (Stop / akhir sumber); kembalikan semua flow selesai yang tertunda."""
+        for key, f in self._flows.items():
+            self._ended.append(FlowEnd(make_flow_id(key), f.first_ts, f.last_ts))
+        self._flows.clear()
+        return self.pop_ended()
 
     def add(self, p: PacketRecord) -> list[WindowFlow]:
         """Masukkan satu paket; kembalikan fitur jendela yang selesai karena paket ini."""
@@ -139,7 +170,7 @@ class WindowAggregator:
         """Majukan jam ke `now`: tutup jendela yang sudah lewat (dipakai juga sebagai detak saat live idle)."""
         if self._start is None or now < self._start + self.window_sec:
             return []
-        out = self._close_window()
+        out = self._close_window(now)
         # lompati jendela kosong
         self._start += math.floor((now - self._start) / self.window_sec) * self.window_sec
         return out
@@ -174,9 +205,10 @@ class WindowAggregator:
         flow.win_last = max(p.ts, flow.win_last or p.ts)
         flow.last_ts = max(p.ts, flow.last_ts)
 
-    def _close_window(self) -> list[WindowFlow]:
+    def _close_window(self, now: float | None = None) -> list[WindowFlow]:
         assert self._start is not None
         start, end = self._start, self._start + self.window_sec
+        ref = end if now is None else max(end, now)  # jeda panjang: idle diukur sampai `now`, bukan akhir jendela
         out: list[WindowFlow] = []
         for key, f in list(self._flows.items()):
             if f.win_first is not None:
@@ -186,7 +218,8 @@ class WindowAggregator:
                 else:
                     self.skipped_min_packets += 1
             f.reset_window()
-            if end - f.last_ts > self.idle_timeout_sec:
+            if ref - f.last_ts > self.end_idle_sec:
+                self._ended.append(FlowEnd(make_flow_id(key), f.first_ts, f.last_ts))
                 del self._flows[key]
         return out
 

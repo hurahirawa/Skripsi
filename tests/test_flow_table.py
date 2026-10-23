@@ -148,3 +148,25 @@ def test_validasi_argumen():
 
 def test_flush_tanpa_paket():
     assert agg().flush() == []
+
+
+def test_call_end_idle_lebih_cepat_dari_flow_idle():
+    a = WindowAggregator(5.0, "window", 1, 120.0, 10.0)
+    a.add(pkt(0.0))
+    a.add(pkt(1.0, B, A))
+    a.add(pkt(5.0, ("10.9.9.9", 1), ("10.9.9.8", 2)))
+    a.add(pkt(20.0, ("10.9.9.9", 1), ("10.9.9.8", 2)))
+    ended = a.pop_ended()  # kedua flow idle > 10 detik (walau < 120 detik); paket 20.0 memulai flow baru
+    assert len(ended) == 2
+    end = ended[0]
+    assert end.flow_id == "10.0.0.1:5000-10.0.0.2:6000-17" and (end.first_ts, end.last_ts) == (0.0, 1.0)
+    assert a.pop_ended() == [] and a.active_flows == 1  # flow baru dari paket 20.0
+
+
+def test_call_end_idle_none_mengikuti_flow_idle_dan_end_all_mengakhiri_sisa():
+    a = agg(idle=120.0)
+    a.add(pkt(0.0))
+    a.add(pkt(30.0))
+    assert a.pop_ended() == [] and a.active_flows == 1  # idle < 120 detik: masih berjalan
+    (end,) = a.end_all()
+    assert end.last_ts == 30.0 and a.active_flows == 0

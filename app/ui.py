@@ -18,6 +18,7 @@ from qos.capture import sniffer  # noqa: E402
 from qos.capture.sniffer import LIVE_BACKENDS, CaptureError, iter_pcap  # noqa: E402
 from qos.recommend.rules import load_rules  # noqa: E402
 from qos.config import DEFAULT_CONFIG_PATH, USER_CONFIG_NAME, load_config, resolve_path, setup_logging  # noqa: E402
+from qos.monitor.calls import call_title  # noqa: E402
 from qos.monitor.engine import (  # noqa: E402
     Artifacts,
     InferenceEngine,
@@ -109,6 +110,20 @@ def drain_session() -> pd.DataFrame:
     return rows
 
 
+def drain_calls() -> pd.DataFrame:
+    """Pindahkan panggilan selesai ke st.session_state['live_calls'], tampilkan toast tiap panggilan, kembalikan semuanya."""
+    calls = st.session_state.get("live_calls", pd.DataFrame())
+    session = st.session_state.get("session")
+    if session is not None:
+        batches = session.drain_calls()
+        if batches:
+            for row in pd.concat(batches, ignore_index=True).itertuples():
+                st.toast(f"Panggilan {call_title(row.flow_id)} selesai: {row.label_akhir}", icon="📞")
+            calls = pd.concat([calls, *batches], ignore_index=True)
+            st.session_state["live_calls"] = calls
+    return calls
+
+
 def list_sample_pcaps(cfg: dict) -> list[Path]:
     """Daftar PCAP di data/sample_pcap."""
     folder = ROOT / "data" / "sample_pcap"
@@ -151,7 +166,7 @@ def _start(
     except OSError as exc:
         st.sidebar.error(f"Gagal membuat sesi: {exc}")
         return
-    st.session_state.update(session=session, live_rows=pd.DataFrame(), last_summary=None)
+    st.session_state.update(session=session, live_rows=pd.DataFrame(), live_calls=pd.DataFrame(), last_summary=None)
     session.start()
 
 

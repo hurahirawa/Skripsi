@@ -116,7 +116,7 @@ python scripts/replay_pcap.py --pcap data/sample_pcap/<berkas>.pcap --speed 0   
 python scripts/replay_pcap.py --pcap <berkas> --speed 0 --compare               # bandingkan feature_mode window vs cumulative
 ```
 
-Keluarannya: CSV jendela di `reports/riwayat/jendela_<id_sesi>.csv` dan ringkasan sesi `riwayat_pemantauan_<waktu>.csv` (ditulis saat Stop).
+Keluarannya: CSV jendela di `reports/riwayat/jendela_<id_sesi>.csv` dan ringkasan sesi `riwayat_pemantauan_<waktu>.csv` (ditulis saat Stop), dan ringkasan per panggilan `panggilan_<id_sesi>.csv`.
 
 `monitoring.feature_mode`: `cumulative` (default; statistik sejak awal flow) atau `window` (hanya paket dalam jendela). Mode `window` memberi FAI ≈ 0,13% pada RTP tanpa loss karena efek batas jendela, sehingga `cumulative` dijadikan default.
 
@@ -176,8 +176,9 @@ Setiap pelatihan membuat `artifacts/<YYYYMMDD_HHMMSS>/` dan `artifacts/current.t
 ## Riwayat dan ekspor
 
 - `reports/riwayat/jendela_<id_sesi>.csv` — ditambah tiap jendela: `waktu_jendela, id_sesi, flow_id, delay_ms, jitter_ms, fwd, bwd, fai_pct, cluster_id, membership_prob, label, kategori_tindakan, metrik_penyebab, pc1, pc2, feature_mode, diimputasi`. `id_sesi` berakhiran 6 karakter acak.
-- `reports/riwayat/riwayat_pemantauan_<waktu>.csv` — ringkasan sesi saat Stop (status "Kritis" bila proporsi QoS Buruk + Anomali > `kritis_ratio`, tidak menghitung *Data Belum Cukup*).
-- `reports/exports/laporan_<id_sesi>.csv|pdf` — dibuat dari halaman *Rekomendasi & Ekspor* (PDF: info sesi dan model, distribusi label, rekomendasi, tabel aliran, profil klaster).
+- `reports/riwayat/panggilan_<id_sesi>.csv` — satu baris per panggilan (flow) yang selesai: idle melewati `monitoring.call_end_idle_sec` (default 10 detik; efektif nilai terkecil dengan `flow_idle_timeout_sec`), atau saat Stop / PCAP habis. Kolom: `flow_id, waktu_mulai, waktu_selesai, durasi_s, total_fwd, total_bwd, delay_ms, jitter_ms, fai_pct, cluster_id, label_akhir, kategori_tindakan, metrik_penyebab, jumlah_jendela, persen_baik, persen_cukup, persen_buruk, persen_anomali, persen_belum_cukup, label_terburuk, catatan`. `label_akhir` = label jendela kumulatif terakhir; panggilan yang berakhir *Data Belum Cukup* tetap dicatat. **Pada `feature_mode: window`** nilai dan `label_akhir` hanya dari jendela terakhir (kolom `catatan` memberi peringatan); ringkasan panggilan yang sah hanya pada mode `cumulative`. Dashboard menampilkannya di panel *Panggilan Selesai* dan memunculkan toast saat panggilan selesai.
+- `reports/riwayat/riwayat_pemantauan_<waktu>.csv` — ringkasan sesi saat Stop (status "Kritis" bila proporsi QoS Buruk + Anomali > `kritis_ratio`, tidak menghitung *Data Belum Cukup*); kolom tambahan `jumlah_panggilan` dan `panggilan_baik/cukup/buruk/anomali/belum_cukup` (jumlah per kategori `label_akhir`).
+- `reports/exports/laporan_<id_sesi>.csv|pdf` — dibuat dari halaman *Rekomendasi & Ekspor* (PDF: info sesi dan model, distribusi label, rekomendasi, tabel panggilan selesai beserta rekomendasi per panggilan bermasalah, tabel aliran, profil klaster).
 
 ## Tangkapan layar
 

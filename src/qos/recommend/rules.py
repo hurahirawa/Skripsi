@@ -123,3 +123,16 @@ def cluster_recommendations(profile: Iterable[dict[str, Any]], rules: dict[str, 
                  "kategori": rec.category, "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
             )
     return out
+
+
+def call_recommendations(calls: pd.DataFrame, rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rekomendasi per panggilan bermasalah (label_akhir QoS Buruk atau Anomali) dari tabel panggilan."""
+    out = []
+    for row in calls.fillna({"metrik_penyebab": ""}).itertuples():
+        rec = recommend(str(row.label_akhir), rules, row.metrik_penyebab)
+        if rec is not None:
+            out.append(
+                {"flow_id": row.flow_id, "label": rec.label, "kategori": rec.category,
+                 "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
+            )
+    return out

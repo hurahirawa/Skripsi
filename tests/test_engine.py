@@ -241,3 +241,122 @@ def test_default_feature_mode_cumulative():
 def test_safe_name():
     assert safe_name("Wi-Fi 2/eth0") == "Wi-Fi_2_eth0"
     assert safe_name("///") == "sesi"
+
+
+# ---- ringkasan per panggilan (MON-9) ----
+from qos.capture.flow_table import PacketRecord  # noqa: E402
+from qos.monitor.calls import CALL_COLUMNS, WINDOW_MODE_NOTE, CallTracker, call_title, worst_label  # noqa: E402
+
+CA, CB = ("10.1.0.1", 4000), ("10.1.0.2", 4000)
+
+
+def call_packets(a, b, t0, t1, step=0.1, both=True):
+    """Paket RTP dua arah (atau searah) antara a dan b dari t0 sampai t1."""
+    out, t = [], t0
+    while t < t1:
+        out.append(PacketRecord(t, a[0], b[0], a[1], b[1], 17, 160))
+        if both:
+            out.append(PacketRecord(t + 0.01, b[0], a[0], b[1], a[1], 17, 160))
+        t += step
+    return out
+
+
+def call_session(cfg, packets, mode="cumulative", hold=False):
+    c = copy.deepcopy(cfg)
+    c["monitoring"]["feature_mode"] = mode
+    engine = InferenceEngine(load_artifacts(c), c)
+
+    def source(stop):
+        yield from packets
+        if hold:
+            stop.wait(30)  # sumber tetap terbuka sampai Stop
+
+    return MonitoringSession(c, engine, source, "panggilan")
+
+
+def test_panggilan_selesai_karena_idle(env):
+    cfg, _ = env
+    other = ("10.1.0.9", 4100), ("10.1.0.8", 4100)
+    pkts = sorted(call_packets(CA, CB, 0, 10) + call_packets(*other, 0, 40), key=lambda p: p.ts)
+    s = call_session(cfg, pkts)
+    s.start()
+    assert s.wait(60)
+    s.stop()
+    calls = pd.read_csv(s.calls_csv)
+    assert list(calls.columns) == list(CALL_COLUMNS)
+    assert len(calls) == 2
+    first = calls.iloc[0]  # selesai karena idle (call_end_idle_sec = 10) sebelum sumber habis
+    assert first["flow_id"] == "10.1.0.1:4000-10.1.0.2:4000-17"
+    assert first["durasi_s"] == pytest.approx(9.91, abs=0.1)
+    assert first["jumlah_jendela"] >= 1 and first["total_fwd"] >= 90 and first["total_bwd"] >= 90
+    last_row = pd.read_csv(s.window_csv).query("flow_id == @first.flow_id").iloc[-1]
+    assert first["label_akhir"] == last_row["label"]  # label_akhir = label jendela kumulatif terakhir
+    pct = calls[[c for c in CALL_COLUMNS if c.startswith("persen_")]].sum(axis=1)
+    assert pct.tolist() == pytest.approx([100.0, 100.0])
+    assert calls["catatan"].isna().all()  # kosong pada mode cumulative
+    assert s.n_calls == 2 and sum(len(b) for b in s.drain_calls()) == 2
+
+
+def test_panggilan_selesai_karena_stop(env):
+    cfg, _ = env
+    s = call_session(cfg, call_packets(CA, CB, 0, 10), hold=True)
+    s.start()
+    s.wait(1.5)
+    assert s.running and not s.calls_csv.exists()  # belum idle, belum Stop → belum selesai
+    path = s.stop()
+    calls = pd.read_csv(s.calls_csv)
+    assert len(calls) == 1
+    summary = pd.read_csv(path)
+    assert summary["jumlah_panggilan"].iloc[0] == 1
+    final_cols = ["panggilan_baik", "panggilan_cukup", "panggilan_buruk", "panggilan_anomali", "panggilan_belum_cukup"]
+    assert summary[final_cols].sum(axis=1).iloc[0] == 1
+
+
+def test_panggilan_data_belum_cukup_tetap_dicatat(env):
+    cfg, _ = env
+    s = call_session(cfg, call_packets(CA, CB, 0, 10, both=False))  # searah: bwd = 0
+    s.start()
+    s.wait(60)
+    s.stop()
+    (call,) = pd.read_csv(s.calls_csv).to_dict("records")
+    assert call["label_akhir"] == INSUFFICIENT and call["label_terburuk"] == INSUFFICIENT
+    assert call["persen_belum_cukup"] == 100.0 and call["kategori_tindakan"] == "-"
+    summary = pd.read_csv(s.stop())
+    assert summary["panggilan_belum_cukup"].iloc[0] == 1
+
+
+def test_panggilan_mode_window_diberi_catatan(env):
+    cfg, _ = env
+    s = call_session(cfg, call_packets(CA, CB, 0, 10), mode="window")
+    s.start()
+    s.wait(60)
+    s.stop()
+    (call,) = pd.read_csv(s.calls_csv).to_dict("records")
+    assert call["label_akhir"]  # tetap dicatat
+    assert call["catatan"] == WINDOW_MODE_NOTE and "cumulative" in call["catatan"]
+
+
+def test_tracker_persen_dan_label_terburuk():
+    from qos.capture.flow_table import FlowEnd
+
+    def win(label, fwd):
+        return {"flow_id": "f", "label": label, "fwd": fwd, "bwd": fwd, "delay_ms": 1.0, "jitter_ms": 1.0,
+                "fai_pct": 0.0, "cluster_id": 0, "kategori_tindakan": "-", "metrik_penyebab": ""}
+
+    labels = ["QoS Baik", "QoS Buruk - Delay", "QoS Buruk - Jitter", "QoS Buruk - Jitter", INSUFFICIENT]
+    t = CallTracker("cumulative")
+    t.update(pd.DataFrame([win(lab, i) for i, lab in enumerate(labels)]))
+    (row,) = t.finish([FlowEnd("f", 0.0, 12.0), FlowEnd("tidak_ada", 0.0, 1.0)]).to_dict("records")
+    assert row["jumlah_jendela"] == 5 and row["durasi_s"] == 12.0 and row["total_fwd"] == 4
+    assert (row["persen_baik"], row["persen_buruk"], row["persen_belum_cukup"]) == (20.0, 60.0, 20.0)
+    assert row["label_akhir"] == INSUFFICIENT and row["label_terburuk"] == "QoS Buruk - Jitter"
+    assert t.finish([FlowEnd("f", 0.0, 1.0)]).empty  # state sudah dibuang
+
+
+def test_worst_label_dan_call_title():
+    from collections import Counter
+
+    assert worst_label(Counter()) == INSUFFICIENT
+    assert worst_label(Counter({"QoS Baik": 9, "Anomali - X": 1})) == "Anomali - X"
+    assert call_title("192.168.1.25:16384-192.168.1.10:16384-17") == "192.168.1.25 ↔ 192.168.1.10"
+    assert call_title("aneh") == "aneh"
