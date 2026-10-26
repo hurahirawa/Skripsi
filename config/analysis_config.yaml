@@ -69,3 +69,8 @@ analysis:
     candidate_clusters: [3, 5]               # kandidat terbaik dengan jumlah klaster di rentang ini (inklusif)
     distance_limit_percentile: 95            # batas "jauh dari semua klaster" = persentil ini dari jarak ke centroid sendiri
     report_marker: "<!-- BAGIAN-F -->"
+    selection:                               # Bagian G: aturan pemilihan HDBSCAN final
+      max_noise_ratio: 0.20
+      min_clusters: 2
+      min_ari_mean: 0.90                     # ARI bootstrap (analysis.stability) rata-rata; kandidat valid memenuhi semua syarat
+      report_marker: "<!-- BAGIAN-G -->"

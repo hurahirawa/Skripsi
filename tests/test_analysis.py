@@ -243,3 +243,30 @@ def test_centroids_original_units_invers_transform():
     out = centroids_original_units({1: scaler.transform(feats).mean(axis=0)}, scaler, list(raw.columns), ["iat_mean_us", "iat_std_us"])
     assert out["delay_ms"].iloc[0] == pytest.approx(np.expm1(np.log1p(raw["iat_mean_us"]).mean()) / 1000)  # µs → ms
     assert out["fai_pct"].iloc[0] == pytest.approx(5.0)
+
+
+from qos.analysis.final import distance_rules, recommend_rule, select_final_hdbscan  # noqa: E402
+
+
+def test_select_final_hdbscan_filter_ari_dan_seri():
+    grid = pd.DataFrame({
+        "min_cluster_size": [3, 5, 8, 10], "min_samples": [1, 1, 1, 1], "n_clusters": [5.0, 5.0, 1.0, 5.0],
+        "noise_ratio": [0.1, 0.1, 0.1, 0.1], "silhouette": [0.8, 0.9, 0.9, 0.7], "dbcv": [0.7, 0.7, 0.99, 0.95],
+        "ari_mean": [0.95, 0.95, 0.99, 0.5],
+    })
+    sel = {"max_noise_ratio": 0.2, "min_clusters": 2, "min_ari_mean": 0.9}
+    best, valid, _ = select_final_hdbscan(grid, sel)
+    assert len(valid) == 2 and best["min_cluster_size"] == 5   # klaster=1 dan ARI rendah gugur; seri DBCV → Silhouette
+    with pytest.raises(ValueError):
+        select_final_hdbscan(grid, {**sel, "min_ari_mean": 0.999})
+
+
+def test_distance_rules_dan_rekomendasi():
+    rng = np.random.default_rng(0)
+    X = np.vstack([rng.normal(0, 0.2, (100, 2)), rng.normal(10, 2.0, (100, 2)), [[5.0, 5.0]]])
+    labels = np.r_[np.zeros(100), np.ones(100), -1].astype(int)
+    r = distance_rules(X, labels, 95)
+    assert len(r) == 3 and (r["noise total"] == 1).all() and (r["noise ditandai"] == 1).all()
+    c = r.iloc[2]   # aturan (c) = max(per klaster, global) tidak pernah lebih longgar menandai daripada (a)
+    assert c["non-noise ditandai"] <= r.iloc[0]["non-noise ditandai"]
+    assert recommend_rule(r) in (0, 1, 2)

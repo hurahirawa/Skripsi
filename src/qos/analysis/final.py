@@ -61,3 +61,61 @@ def centroids_original_units(cent_map: dict[int, np.ndarray], scaler, columns: l
             raw[c] = raw[c] / 1000.0
     raw.index.name = "klaster"
     return raw.reset_index()
+
+
+def select_final_hdbscan(grid: pd.DataFrame, sel: dict) -> tuple[pd.Series, pd.DataFrame, str]:
+    """Aturan final: kandidat valid = noise <= max, klaster >= min, ARI mean >= min; pilih DBCV tertinggi (seri → Silhouette).
+
+    `grid` harus punya kolom ari_mean. Kembalikan (baris terpilih, tabel kandidat valid terurut, alasan).
+    """
+    ok = grid[
+        (grid["noise_ratio"] <= sel["max_noise_ratio"]) & (grid["n_clusters"] >= sel["min_clusters"])
+        & (grid["ari_mean"] >= sel["min_ari_mean"]) & grid["dbcv"].notna()
+    ].sort_values(["dbcv", "silhouette"], ascending=False)
+    if ok.empty:
+        raise ValueError("Tidak ada kandidat HDBSCAN yang memenuhi aturan final")
+    best = ok.iloc[0]
+    reason = (
+        f"min_cluster_size={int(best['min_cluster_size'])}, min_samples={int(best['min_samples'])}: DBCV tertinggi ({best['dbcv']:.4f}) "
+        f"di antara {len(ok)} kandidat valid (noise <= {sel['max_noise_ratio']:.0%}, klaster >= {sel['min_clusters']}, "
+        f"ARI mean >= {sel['min_ari_mean']:g}); {int(best['n_clusters'])} klaster, noise {best['noise_ratio']:.1%}, "
+        f"Silhouette {best['silhouette']:.4f}, ARI {best['ari_mean']:.3f}."
+    )
+    return best, ok, reason
+
+
+def distance_rules(X: np.ndarray, labels: np.ndarray, percentile: float) -> pd.DataFrame:
+    """Bandingkan tiga aturan batas "jauh dari semua klaster" (jarak ke SEMUA centroid > batas klaster itu).
+
+    (a) p-persentil per klaster; (b) satu batas global = persentil seluruh jarak non-noise ke centroid sendiri;
+    (c) per klaster = max(a, b). Kembalikan % noise dan % non-noise yang ditandai jauh per aturan.
+    """
+    labels = np.asarray(labels)
+    cents = cl.centroids(X, labels)
+    ids = sorted(cents)
+    per = distance_limits(X, labels, percentile)
+    mask = labels != cl.NOISE
+    own = np.concatenate([np.linalg.norm(X[labels == c] - cents[c], axis=1) for c in ids])
+    glob = float(np.percentile(own, percentile))
+    rules = {
+        f"(a) p{percentile:g} per klaster": per,
+        f"(b) global p{percentile:g} ({glob:.3f})": {c: glob for c in ids},
+        "(c) max(per klaster, global)": {c: max(per[c], glob) for c in ids},
+    }
+    rows = []
+    for name, lim in rules.items():
+        far_noise = far_from_all(X[~mask], cents, lim) if (~mask).any() else np.array([], dtype=bool)
+        far_in = far_from_all(X[mask], cents, lim)
+        rows.append({
+            "aturan": name, "noise ditandai jauh (%)": float(far_noise.mean() * 100) if far_noise.size else float("nan"),
+            "noise ditandai": int(far_noise.sum()), "noise total": int((~mask).sum()),
+            "non-noise ditandai jauh (%)": float(far_in.mean() * 100), "non-noise ditandai": int(far_in.sum()), "non-noise total": int(mask.sum()),
+            "salah tandai": int((~far_noise).sum() + far_in.sum()),
+            "batas per klaster": ", ".join(f"K{c}: {lim[c]:.3f}" for c in ids),
+        })
+    return pd.DataFrame(rows)
+
+
+def recommend_rule(rules: pd.DataFrame) -> int:
+    """Indeks aturan dengan salah tandai paling sedikit (noise lolos + non-noise ditandai jauh); seri → noise ditandai lebih banyak."""
+    return int(rules.sort_values(["salah tandai", "noise ditandai"], ascending=[True, False]).index[0])

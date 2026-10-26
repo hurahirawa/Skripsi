@@ -199,8 +199,11 @@ def main() -> None:
     L.append("")
 
     rep = out_dir / REPORT_NAME
-    text = rep.read_text(encoding="utf-8").split(fin["report_marker"])[0].rstrip() + "\n\n"
-    rep.write_text(text + "\n".join(L), encoding="utf-8")
+    old = rep.read_text(encoding="utf-8")
+    g_marker = fin["selection"]["report_marker"]
+    g_part = "\n\n" + g_marker + old.split(g_marker, 1)[1] if g_marker in old else ""   # pertahankan bagian G
+    text = old.split(fin["report_marker"])[0].rstrip() + "\n\n"
+    rep.write_text(text + "\n".join(L) + g_part, encoding="utf-8")
     print(f"Laporan: {rep}")
 
 
