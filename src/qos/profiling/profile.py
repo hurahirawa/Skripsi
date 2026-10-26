@@ -1,4 +1,4 @@
-"""Profil klaster: statistik, box plot, dan statistik pelabelan (PRD FR-PRF)."""
+"""Profil klaster: statistik deskriptif, box plot, centroid, batas jarak, dan deskripsi ITU (PRD FR-PRF)."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,9 +6,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from qos.profiling.labeling import NOISE_ID, apply_labels
+from qos.profiling.describe import describe
 
 PROFILE_METRICS: tuple[str, ...] = ("delay_ms", "jitter_ms", "fai_pct")
+NOISE_ID = -1
 
 
 def basic_stats(values: pd.Series) -> dict[str, float | None]:
@@ -59,10 +60,10 @@ def plr_pct(fwd: pd.Series, bwd: pd.Series) -> float:
     return float(np.maximum(fwd - bwd, 0).sum() / total * 100)
 
 
-def labeling_stats(
+def extra_stats(
     df: pd.DataFrame, jitter_pct: float, fwd_col: str = "fwd_packets_count", bwd_col: str = "bwd_packets_count"
 ) -> dict[str, float]:
-    """Mean delay, P(`jitter_pct`) jitter, dan PLR untuk satu klaster."""
+    """Statistik deskriptif tambahan satu klaster: mean delay, P(`jitter_pct`) jitter, dan PLR (bukan dasar klasterisasi)."""
     return {
         "mean_delay_ms": float(df["delay_ms"].mean()),
         "p999_jitter_ms": percentile(df["jitter_ms"], jitter_pct),
@@ -70,33 +71,59 @@ def labeling_stats(
     }
 
 
-def build_cluster_profile(
-    df: pd.DataFrame, cluster_ids: np.ndarray | pd.Series, cfg: dict[str, Any]
-) -> list[dict[str, Any]]:
-    """Profil tiap klaster (termasuk -1) dari `df` (berkolom delay_ms, jitter_ms, fai_pct, fwd, bwd).
+def cluster_name(cid: int) -> str:
+    """Nama tampilan: "Klaster N" (N mulai 1) atau "Noise"."""
+    return "Noise" if cid == NOISE_ID else f"Klaster {cid}"
 
-    Ambang dan parameter dari `cfg`; label diturunkan dari statistik pelabelan.
+
+def describe_stats(stats: dict[str, dict[str, Any]], thresholds: dict[str, float]) -> dict[str, Any]:
+    """Deskripsi ITU dari median delay/jitter/FAI pada `statistik` klaster."""
+    return describe(stats["delay_ms"]["median"], stats["jitter_ms"]["median"], stats["fai_pct"]["median"], thresholds)
+
+
+def build_cluster_profile(
+    df: pd.DataFrame,
+    cluster_ids: np.ndarray | pd.Series,
+    cfg: dict[str, Any],
+    centroids_raw: dict[int, dict[str, float]] | None = None,
+    limits: dict[int, float] | None = None,
+    own_distance: dict[int, dict[str, float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Profil tiap klaster (termasuk Noise = -1) dari `df` (berkolom delay_ms, jitter_ms, fai_pct).
+
+    Berisi anggota, statistik dan box plot (satuan asli), centroid satuan asli, batas jarak, serta deskripsi
+    posisi terhadap ambang ITU dari config (deskriptif, bukan label).
     """
     ids = pd.Series(np.asarray(cluster_ids), index=df.index)
     prof, th = cfg["profiling"], cfg["thresholds"]
+    max_out = prof["max_outliers"]
     result = []
     for cid in sorted(ids.unique()):
         sub = df[ids == cid]
-        stats = labeling_stats(sub, prof["jitter_percentile"])
-        labeled = apply_labels(stats, th, noise=cid == NOISE_ID)
+        stats = {m: basic_stats(sub[m]) for m in PROFILE_METRICS}
+        desc = describe_stats(stats, th)
         result.append(
             {
                 "id_klaster": int(cid),
+                "nama": cluster_name(int(cid)),
                 "jumlah_anggota": int(len(sub)),
-                "statistik": {m: basic_stats(sub[m]) for m in PROFILE_METRICS},
-                "boxplot": {m: boxplot_stats(sub[m], prof["max_outliers"]) for m in PROFILE_METRICS},
-                "statistik_pelabelan": stats,
-                **labeled,
+                "statistik": stats,
+                "boxplot": {m: boxplot_stats(sub[m], max_out) for m in PROFILE_METRICS},
+                "statistik_tambahan": extra_stats(sub, prof["jitter_percentile"]),
+                "centroid_asli": (centroids_raw or {}).get(int(cid)),
+                "batas_jarak": (limits or {}).get(int(cid)),
+                "jarak_sendiri": (own_distance or {}).get(int(cid)),
+                "deskripsi": desc,
+                "metrik_melewati_ambang": desc["melewati_ambang"],
             }
         )
     return result
 
 
-def label_map(profile: list[dict[str, Any]]) -> dict[str, str]:
-    """Peta id_klaster (string) → label, seperti `label_map` di cluster_profile.json."""
-    return {str(c["id_klaster"]): c["label"] for c in profile}
+def redescribe(profile: list[dict[str, Any]], thresholds: dict[str, float]) -> list[dict[str, Any]]:
+    """Hitung ulang deskripsi ITU dari statistik tersimpan dengan ambang baru (tanpa refit, tanpa data latih)."""
+    out = []
+    for c in profile:
+        desc = describe_stats(c["statistik"], thresholds)
+        out.append({**c, "deskripsi": desc, "metrik_melewati_ambang": desc["melewati_ambang"]})
+    return out

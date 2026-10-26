@@ -1,4 +1,4 @@
-"""Pelatihan HDBSCAN: grid search, evaluasi, profil, dan penyimpanan artefak versi (PRD FR-TR)."""
+"""Pelatihan klasterisasi murni: HDBSCAN (aturan seleksi final), pembanding K-Means, centroid, batas jarak, profil, artefak (PRD FR-TR)."""
 from __future__ import annotations
 
 import itertools
@@ -6,9 +6,9 @@ import json
 import logging
 import math
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 import hdbscan
@@ -17,97 +17,88 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
+from qos.analysis import clustering as cl
+from qos.analysis.final import centroids_original_units
 from qos.config import resolve_path
 from qos.data.loader import filter_voip, load_flows
 from qos.features.extract import derive_metrics
 from qos.features.preprocess import apply_session_filters, build_features, clean_features, fit_scaler
+from qos.model.assignment import RULE_TEXT, assign, centroids_of, distance_limits
 from qos.model.evaluate import evaluate_clustering, silhouette_label
-from qos.profiling.profile import build_cluster_profile, label_map
+from qos.profiling.profile import build_cluster_profile
 
 logger = logging.getLogger(__name__)
 
 VERSION_FORMAT = "%Y%m%d_%H%M%S"
 CURRENT_FILE = "current.txt"
+SCHEMA = "klaster_murni"       # penanda artefak; versi lama (pelabelan QoS) tidak punya penanda ini
+SCHEMA_VERSION = 2
 COUNT_COLUMNS: tuple[str, ...] = ("fwd_packets_count", "bwd_packets_count")
 ARTIFACT_FILES: tuple[str, ...] = (
     "hdbscan_model.joblib",
+    "kmeans_n.joblib",
+    "kmeans_opt.joblib",
     "scaler.joblib",
     "pca.joblib",
+    "assignment.json",
     "cluster_profile.json",
     "train_meta.json",
     "grid_results.csv",
     "training_sample.csv",
 )
-
-
-def fit_hdbscan(X: np.ndarray, min_cluster_size: int, min_samples: int, method: str) -> hdbscan.HDBSCAN:
-    """Fit HDBSCAN (paket hdbscan, euclidean, prediction_data=True) — PRD TR-1."""
-    model = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-        metric="euclidean",
-        cluster_selection_method=method,
-        prediction_data=True,
-    )
-    return model.fit(X)
-
-
-TIE_BREAK_RULE = (
-    "Silhouette tertinggi; seri → CHI tertinggi; seri → min_cluster_size terkecil; "
-    "seri → min_samples terkecil (kandidat identik menghasilkan klaster yang sama)"
+SELECTION_RULE = (
+    "Kandidat valid = noise <= batas, klaster >= minimum, ARI bootstrap rata-rata >= minimum; "
+    "pilih DBCV tertinggi; seri -> Silhouette tertinggi; seri -> min_cluster_size lalu min_samples terkecil"
 )
-TIE_DECIMALS = 9  # selisih di bawah 1e-9 dianggap seri
 
 
-def rank_candidates(results: pd.DataFrame) -> pd.DataFrame:
-    """Kandidat valid terurut menurut TIE_BREAK_RULE (terbaik di baris pertama)."""
-    valid = results[results["valid"]].copy()
-    valid["_sil"] = valid["silhouette"].round(TIE_DECIMALS)
-    valid["_chi"] = valid["chi"].round(TIE_DECIMALS)
-    ranked = valid.sort_values(
-        ["_sil", "_chi", "min_cluster_size", "min_samples"], ascending=[False, False, True, True], kind="stable"
-    )
-    return ranked.drop(columns=["_sil", "_chi"])
+class TrainError(RuntimeError):
+    """Pelatihan tidak menghasilkan klaster yang dapat dipakai."""
 
 
-def tied_with_best(results: pd.DataFrame) -> list[tuple[int, int]]:
-    """Pasangan (min_cluster_size, min_samples) yang seri penuh (Silhouette dan CHI) dengan kandidat terbaik."""
-    ranked = rank_candidates(results)
-    if ranked.empty:
-        return []
-    best = ranked.iloc[0]
-    same = ranked[
-        (ranked["silhouette"].round(TIE_DECIMALS) == round(best["silhouette"], TIE_DECIMALS))
-        & (ranked["chi"].round(TIE_DECIMALS) == round(best["chi"], TIE_DECIMALS))
-    ]
-    return [(int(a), int(b)) for a, b in zip(same["min_cluster_size"], same["min_samples"])]
+def fit_hdbscan(X: np.ndarray, min_cluster_size: int, min_samples: int, method: str, prediction_data: bool = True) -> hdbscan.HDBSCAN:
+    """Fit HDBSCAN (paket hdbscan, euclidean) — PRD TR-1."""
+    return hdbscan.HDBSCAN(
+        min_cluster_size=int(min_cluster_size), min_samples=int(min_samples), metric="euclidean",
+        cluster_selection_method=method, prediction_data=prediction_data,
+    ).fit(X)
 
 
-def pick_best(results: pd.DataFrame) -> pd.Series | None:
-    """Kandidat terbaik menurut TIE_BREAK_RULE; None jika tak ada kandidat valid."""
-    ranked = rank_candidates(results)
-    return None if ranked.empty else ranked.iloc[0]
+def select_final(grid: pd.DataFrame, sel: dict[str, Any]) -> tuple[pd.Series | None, pd.DataFrame]:
+    """Aturan seleksi final (SELECTION_RULE): (kandidat terbaik atau None, kandidat valid terurut)."""
+    ok = grid[
+        (grid["noise_ratio"] <= sel["max_noise_ratio"]) & (grid["n_clusters"] >= sel["min_clusters"])
+        & (grid["ari_mean"] >= sel["min_ari_mean"]) & grid["dbcv"].notna()
+    ].copy()
+    ok["_dbcv"], ok["_sil"] = ok["dbcv"].round(9), ok["silhouette"].round(9)
+    ok = ok.sort_values(["_dbcv", "_sil", "min_cluster_size", "min_samples"], ascending=[False, False, True, True], kind="stable")
+    ok = ok.drop(columns=["_dbcv", "_sil"])
+    return (None if ok.empty else ok.iloc[0]), ok
 
 
-def grid_search(
-    X: np.ndarray, cfg: dict[str, Any], progress: Callable[[int, int], None] | None = None
-) -> pd.DataFrame:
-    """Grid min_cluster_size × min_samples (PRD TR-2); kolom `valid` = n_klaster ≥ 2 dan noise ≤ batas.
+def grid_search(X: np.ndarray, cfg: dict[str, Any], progress: Callable[[int, int], None] | None = None) -> pd.DataFrame:
+    """Grid min_cluster_size × min_samples dengan metrik dan ARI bootstrap tiap kandidat; kolom `valid` menurut aturan seleksi.
 
     `progress(selesai, total)` dipanggil setelah tiap kandidat (untuk progress bar UI).
     """
-    hcfg, rs = cfg["hdbscan"], cfg["data"]["random_state"]
-    grid = hcfg["grid_search"]
-    rows = []
+    h, rs, ev_cfg = cfg["hdbscan"], cfg["data"]["random_state"], cfg["evaluation"]
+    grid, st, sel, method = h["grid_search"], h["stability"], h["selection"], h["cluster_selection_method"]
     combos = list(itertools.product(grid["min_cluster_size"], grid["min_samples"]))
+    rows = []
     for i, (mcs, ms) in enumerate(combos, start=1):
-        labels = fit_hdbscan(X, mcs, ms, hcfg["cluster_selection_method"]).labels_
-        ev = evaluate_clustering(X, labels, grid["silhouette_sample_size"], rs)
-        valid = ev["n_clusters"] >= 2 and ev["noise_ratio"] <= grid["max_noise_ratio"]
-        rows.append({"min_cluster_size": mcs, "min_samples": ms, **ev, "valid": bool(valid)})
+        labels = fit_hdbscan(X, mcs, ms, method, prediction_data=False).labels_
+        ev = evaluate_clustering(X, labels, grid["silhouette_sample_size"], rs, ev_cfg["dbcv_max_points"])
+        mean, sd = cl.stability_ari(
+            lambda Xs, a=mcs, b=ms: fit_hdbscan(Xs, a, b, method, prediction_data=False).labels_,
+            X, labels, st["n_bootstrap"], st["fraction"], rs,
+        )
+        rows.append({"min_cluster_size": mcs, "min_samples": ms, **ev, "ari_mean": mean, "ari_sd": sd})
         if progress is not None:
             progress(i, len(combos))
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    _, ok = select_final(out, sel)
+    out["valid"] = out.index.isin(ok.index)
+    return out
 
 
 def _jsonable(obj: Any) -> Any:
@@ -116,6 +107,8 @@ def _jsonable(obj: Any) -> Any:
         return {str(k): _jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _jsonable(obj.tolist())
     if isinstance(obj, np.generic):
         obj = obj.item()
     if isinstance(obj, float) and not math.isfinite(obj):
@@ -132,6 +125,22 @@ def load_training_frame(source: Path, cfg: dict[str, Any]) -> tuple[pd.DataFrame
     return final, {"total_flow": len(raw), "voip": len(voip), "setelah_filter_sesi": len(final)}
 
 
+def _kmeans_block(X: np.ndarray, k: int, cfg: dict[str, Any], title: str) -> dict[str, Any]:
+    """Fit K-Means k tertentu: model, label ber-nomor 1..k, centroid, metrik, ARI bootstrap, waktu fit."""
+    km, ev_cfg, rs = cfg["kmeans"], cfg["evaluation"], cfg["data"]["random_state"]
+    st = cfg["hdbscan"]["stability"]
+    t0 = time.perf_counter()
+    model = cl.kmeans_fit(X, k, km["n_init"], rs)
+    fit_time = time.perf_counter() - t0
+    labels = cl.apply_mapping(model.labels_, cl.renumber_by_size(model.labels_))
+    ari = cl.stability_ari(lambda Xs: cl.kmeans_fit(Xs, k, km["n_init"], rs).labels_, X, labels, st["n_bootstrap"], st["fraction"], rs)
+    ev = evaluate_clustering(X, labels, cfg["hdbscan"]["grid_search"]["silhouette_sample_size"], rs, ev_cfg["dbcv_max_points"])
+    return {
+        "nama": title, "k": k, "model": model, "labels": labels, "centroids": centroids_of(X, labels),
+        "metrik": {**ev, "ari_mean": ari[0], "ari_sd": ari[1], "waktu_fit_s": fit_time},
+    }
+
+
 def train(
     flows: pd.DataFrame,
     cfg: dict[str, Any],
@@ -140,12 +149,14 @@ def train(
     progress: Callable[[int, int], None] | None = None,
     source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Latih model dari flow yang sudah difilter; `source` (asal data) dicatat di train_meta.json. Mengembalikan semua objek hasil pelatihan (belum disimpan)."""
+    """Latih model dari flow yang sudah difilter; `source` (asal data) dicatat di train_meta.json.
+
+    Mengembalikan semua objek hasil pelatihan (belum disimpan). Klaster bernomor 1..k (urut ukuran menurun), noise -1.
+    """
     data_cfg, feat, hcfg, ev_cfg = cfg["data"], cfg["features"], cfg["hdbscan"], cfg["evaluation"]
     rs = data_cfg["random_state"]
     use_grid = hcfg["grid_search"]["enabled"] if use_grid is None else use_grid
     columns, log_columns = feat["cluster_columns"], feat["log_transform"]
-    # cleaning pada kolom mentah; fitur turunan (delay_ms, jitter_ms, fai_pct) dihitung sesudahnya
     base = list(dict.fromkeys([feat["delay_column"], feat["jitter_column"], *COUNT_COLUMNS]))
 
     clean, medians = clean_features(flows, base, data_cfg["max_train_rows"], rs)
@@ -153,41 +164,100 @@ def train(
     features = build_features(clean, columns, log_columns)
     scaler = fit_scaler(features)
     X = scaler.transform(features)
+    method = hcfg["cluster_selection_method"]
 
-    grid = None
-    fallback = False
-    tied: list[tuple[int, int]] = []
+    grid, fallback = None, False
+    mcs, ms = hcfg["min_cluster_size"], hcfg["min_samples"]
     if use_grid:
         grid = grid_search(X, cfg, progress)
-        best = pick_best(grid)
-        tied = tied_with_best(grid)
+        best, _ = select_final(grid, hcfg["selection"])
         if best is None:
             fallback = True
-            logger.warning("Tidak ada kandidat grid yang valid; memakai parameter tetap dari config")
-            mcs, ms = hcfg["min_cluster_size"], hcfg["min_samples"]
+            logger.warning("Tidak ada kandidat grid yang memenuhi aturan seleksi; memakai parameter tetap dari config")
         else:
             mcs, ms = int(best["min_cluster_size"]), int(best["min_samples"])
-    else:
-        mcs, ms = hcfg["min_cluster_size"], hcfg["min_samples"]
 
-    model = fit_hdbscan(X, mcs, ms, hcfg["cluster_selection_method"])
-    labels = model.labels_
-    evaluation = evaluate_clustering(X, labels, hcfg["grid_search"]["silhouette_sample_size"], rs)
-    evaluation["silhouette_label"] = silhouette_label(evaluation["silhouette"], ev_cfg["silhouette_bands"])
-    profile = build_cluster_profile(clean, labels, cfg)
+    model = fit_hdbscan(X, mcs, ms, method)
+    raw_labels = model.labels_
+    mapping = cl.renumber_by_size(raw_labels)
+    labels = cl.apply_mapping(raw_labels, mapping)
+    n_h = int(len(set(labels.tolist()) - {-1}))
+    if n_h < 1:
+        raise TrainError(f"HDBSCAN (min_cluster_size={mcs}, min_samples={ms}) tidak menemukan klaster; semua titik noise.")
+
+    acfg = cfg["assignment"]
+    cents = centroids_of(X, labels)
+    limits, global_limit = distance_limits(X, labels, cents, acfg["limit_percentile"], acfg["limit_rule"])
+    asg = assign(X, cents, limits)
+    sil_n = hcfg["grid_search"]["silhouette_sample_size"]
+    st = hcfg["stability"]
+    ari = cl.stability_ari(
+        lambda Xs: fit_hdbscan(Xs, mcs, ms, method, prediction_data=False).labels_, X, labels, st["n_bootstrap"], st["fraction"], rs
+    )
+    evaluation = evaluate_clustering(X, labels, sil_n, rs, ev_cfg["dbcv_max_points"])
+    evaluation.update(ari_mean=ari[0], ari_sd=ari[1], silhouette_label=silhouette_label(evaluation["silhouette"], ev_cfg["silhouette_bands"]))
+    assigned = evaluate_clustering(X, cl.assign_noise_to_nearest(X, labels), sil_n, rs, ev_cfg["dbcv_max_points"])
+
+    # pembanding K-Means: k = jumlah klaster HDBSCAN dan k optimal
+    km = cfg["kmeans"]
+    ks = list(range(km["k_min"], min(km["k_max"], len(X) - 1) + 1))
+    sweep_rows = []
+    for k in ks:
+        m = cl.kmeans_fit(X, k, km["n_init"], rs)
+        ev = evaluate_clustering(X, m.labels_, sil_n, rs, ev_cfg["dbcv_max_points"])
+        sweep_rows.append({"k": k, "inertia": float(m.inertia_), **ev, "calinski_harabasz": ev["chi"]})
+    sweep = pd.DataFrame(sweep_rows)
+    k_opt, k_reason = cl.select_kmeans_k(sweep, km["rank_metrics"])
+    kmeans_n = _kmeans_block(X, n_h, cfg, f"K-Means k = {n_h} (= klaster HDBSCAN)")
+    if k_opt == n_h:
+        kmeans_opt = {**kmeans_n, "nama": f"K-Means k = {k_opt} (optimal = klaster HDBSCAN)"}
+    else:
+        kmeans_opt = _kmeans_block(X, k_opt, cfg, f"K-Means k = {k_opt} (optimal)")
+
+    centroids_raw = {
+        int(r["klaster"]): {k: float(v) for k, v in r.items() if k != "klaster"}
+        for r in centroids_original_units(cents, scaler, columns, log_columns).to_dict("records")
+    }
+    own = {}
+    for c, centre in cents.items():
+        d = np.linalg.norm(X[labels == c] - centre, axis=1)
+        own[c] = {"median": float(np.median(d)), "p95": float(np.percentile(d, 95)), "maks": float(d.max())}
+    profile = build_cluster_profile(clean, labels, cfg, centroids_raw, limits, own)
 
     pca = PCA(n_components=2, random_state=rs).fit(X)
     pcs = pca.transform(X)
-    sample = clean.assign(cluster_id=labels, membership_prob=model.probabilities_, pc1=pcs[:, 0], pc2=pcs[:, 1])
+    sample = clean.assign(
+        cluster_id=labels, jarak_terdekat=asg.nearest_dist, di_luar_klaster=asg.outside,
+        klaster_kmeans_n=kmeans_n["labels"], klaster_kmeans_opt=kmeans_opt["labels"], pc1=pcs[:, 0], pc2=pcs[:, 1],
+    )
     if len(sample) > ev_cfg["pca_sample_size"]:
         sample = sample.sample(n=ev_cfg["pca_sample_size"], random_state=rs)
 
+    def cent_json(c: dict[int, np.ndarray]) -> dict[str, list[float]]:
+        return {str(k): v.tolist() for k, v in c.items()}
+
+    assignment = {
+        "aturan": acfg["limit_rule"], "aturan_teks": RULE_TEXT[acfg["limit_rule"]], "persentil": acfg["limit_percentile"],
+        "batas_global": global_limit, "urutan_fitur": list(columns),
+        "hdbscan": {"centroid": cent_json(cents), "batas": {str(k): v for k, v in limits.items()}},
+        "kmeans_n": {"k": kmeans_n["k"], "centroid": cent_json(kmeans_n["centroids"])},
+        "kmeans_opt": {"k": kmeans_opt["k"], "centroid": cent_json(kmeans_opt["centroids"])},
+    }
+    comparison = {
+        "hdbscan": {"nama": "HDBSCAN (tanpa noise)", **evaluation},
+        "hdbscan_assigned": {"nama": "HDBSCAN (noise di-assign ke centroid terdekat)", **assigned, "ari_mean": ari[0], "ari_sd": ari[1]},
+        "kmeans_n": {"nama": kmeans_n["nama"], "k": kmeans_n["k"], **kmeans_n["metrik"]},
+        "kmeans_opt": {"nama": kmeans_opt["nama"], "k": kmeans_opt["k"], **kmeans_opt["metrik"]},
+    }
+
     return {
         "model": model, "scaler": scaler, "frame": clean, "pca": pca, "grid": grid, "profile": profile,
-        "evaluation": evaluation, "sample": sample.reset_index(drop=True), "medians": medians,
+        "evaluation": evaluation, "comparison": comparison, "assignment": assignment,
+        "kmeans_models": {"n": kmeans_n["model"], "opt": kmeans_opt["model"]},
+        "kmeans_sweep": sweep.drop(columns=["calinski_harabasz"]), "k_reason": k_reason,
+        "sample": sample.reset_index(drop=True), "medians": medians,
         "params": {"min_cluster_size": mcs, "min_samples": ms, "grid_search": bool(use_grid),
-                   "grid_fallback": fallback, "tie_break_rule": TIE_BREAK_RULE,
-                   "kandidat_seri_penuh": tied},
+                   "grid_fallback": fallback, "aturan_seleksi": SELECTION_RULE, "k_kmeans_optimal": k_opt},
         "n_train_rows": int(len(clean)), "counts": counts or {}, "labels": labels, "source": source or {},
     }
 
@@ -212,20 +282,29 @@ def save_artifacts(result: dict[str, Any], cfg: dict[str, Any], activate: bool |
     version, out = allocate_version(root)
 
     joblib.dump(result["model"], out / "hdbscan_model.joblib")
+    joblib.dump(result["kmeans_models"]["n"], out / "kmeans_n.joblib")
+    joblib.dump(result["kmeans_models"]["opt"], out / "kmeans_opt.joblib")
     joblib.dump(result["scaler"], out / "scaler.joblib")
     joblib.dump(result["pca"], out / "pca.joblib")
     profile_doc = {
-        "model_version": version,
+        "schema": SCHEMA, "schema_version": SCHEMA_VERSION, "model_version": version,
         "thresholds": cfg["thresholds"],
         "evaluation": result["evaluation"],
+        "comparison": result["comparison"],
+        "kmeans_sweep": result["kmeans_sweep"].to_dict("records"),
+        "k_optimal_alasan": result["k_reason"],
         "clusters": result["profile"],
-        "label_map": label_map(result["profile"]),
     }
     meta = {
+        "schema": SCHEMA, "schema_version": SCHEMA_VERSION,
         "model_version": version,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "parameters": result["params"],
         "cluster_selection_method": cfg["hdbscan"]["cluster_selection_method"],
+        "aturan_seleksi": cfg["hdbscan"]["selection"],
+        "stabilitas": cfg["hdbscan"]["stability"],
+        "kmeans": cfg["kmeans"],
+        "penugasan": cfg["assignment"],
         "cluster_columns": cfg["features"]["cluster_columns"],
         "log_transform": cfg["features"]["log_transform"],
         "kolom_dasar_imputasi": list(result["medians"]),
@@ -239,6 +318,7 @@ def save_artifacts(result: dict[str, Any], cfg: dict[str, Any], activate: bool |
         "random_state": cfg["data"]["random_state"],
         "sumber_data": result.get("source", {}),
     }
+    (out / "assignment.json").write_text(json.dumps(_jsonable(result["assignment"]), indent=2, ensure_ascii=False), "utf-8")
     (out / "cluster_profile.json").write_text(json.dumps(_jsonable(profile_doc), indent=2, ensure_ascii=False), "utf-8")
     (out / "train_meta.json").write_text(json.dumps(_jsonable(meta), indent=2, ensure_ascii=False), "utf-8")
     grid = result["grid"]

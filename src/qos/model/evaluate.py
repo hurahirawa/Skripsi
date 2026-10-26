@@ -1,12 +1,14 @@
-"""Evaluasi klaster: Silhouette, Calinski-Harabasz, dan Noise Ratio (PRD TR-3)."""
+"""Evaluasi klaster: Silhouette, Davies-Bouldin, Calinski-Harabasz, DBCV, dan Noise Ratio (PRD TR-3)."""
 from __future__ import annotations
 
 from typing import Any
 
 import numpy as np
-from sklearn.metrics import calinski_harabasz_score, silhouette_score
+from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 
-from qos.profiling.labeling import NOISE_ID
+from qos.analysis.clustering import dbcv
+
+NOISE_ID = -1
 
 
 def noise_ratio(labels: np.ndarray) -> float:
@@ -46,18 +48,25 @@ def noise_status(ratio: float, ideal: list[float], too_strict: float) -> str:
 
 
 def evaluate_clustering(
-    X: np.ndarray, labels: np.ndarray, sample_size: int, random_state: int
+    X: np.ndarray, labels: np.ndarray, sample_size: int, random_state: int, dbcv_max_points: int = 5000
 ) -> dict[str, Any]:
-    """Silhouette (sample_size) dan CHI tanpa titik noise; NaN jika klaster < 2.
+    """Metrik pada titik non-noise: silhouette (sampel `sample_size`), davies_bouldin, chi, dbcv; NaN jika klaster < 2.
 
-    Kembalian: silhouette, chi, noise_ratio, n_clusters.
+    DBCV O(n²): di atas `dbcv_max_points` titik dihitung pada subsampel acak. Juga: noise_ratio, n_clusters.
     """
     X, labels = np.asarray(X), np.asarray(labels)
     keep = labels != NOISE_ID
     Xc, lc = X[keep], labels[keep]
     k = n_clusters(labels)
-    sil = chi = float("nan")
+    nan = float("nan")
+    out = {"silhouette": nan, "davies_bouldin": nan, "chi": nan, "dbcv": nan, "noise_ratio": noise_ratio(labels), "n_clusters": k}
     if k >= 2 and len(lc) > k:
-        sil = float(silhouette_score(Xc, lc, sample_size=min(sample_size, len(lc)), random_state=random_state))
-        chi = float(calinski_harabasz_score(Xc, lc))
-    return {"silhouette": sil, "chi": chi, "noise_ratio": noise_ratio(labels), "n_clusters": k}
+        out["silhouette"] = float(silhouette_score(Xc, lc, sample_size=min(sample_size, len(lc)), random_state=random_state))
+        out["davies_bouldin"] = float(davies_bouldin_score(Xc, lc))
+        out["chi"] = float(calinski_harabasz_score(Xc, lc))
+        if len(X) > dbcv_max_points:
+            idx = np.random.default_rng(random_state).choice(len(X), size=dbcv_max_points, replace=False)
+            out["dbcv"] = dbcv(X[idx], labels[idx])
+        else:
+            out["dbcv"] = dbcv(X, labels)
+    return out

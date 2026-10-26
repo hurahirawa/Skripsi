@@ -25,8 +25,8 @@ def test_default_config_termuat():
         "loss_good_pct": 1.0,
         "loss_max_pct": 3.0,
     }
-    assert cfg["hdbscan"]["min_cluster_size"] == 5
-    assert cfg["hdbscan"]["min_samples"] == 2
+    assert cfg["hdbscan"]["min_cluster_size"] == 3
+    assert cfg["hdbscan"]["min_samples"] == 8
     assert cfg["data"]["voip_filter"]["sip_ports"] == [5060, 5061]
     assert cfg["features"]["cluster_columns"] == [
         "iat_mean_us",

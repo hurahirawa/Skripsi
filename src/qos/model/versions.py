@@ -1,4 +1,4 @@
-"""Versioning artefak: daftar versi, aktivasi (current.txt), dan Terapkan Ulang Pelabelan (tanpa refit)."""
+"""Versioning artefak: daftar versi, aktivasi (current.txt), dan Perbarui Deskripsi Klaster (tanpa refit)."""
 from __future__ import annotations
 
 import json
@@ -11,15 +11,17 @@ from typing import Any
 import pandas as pd
 
 from qos.config import resolve_path
-from qos.model.train import CURRENT_FILE, _jsonable, allocate_version
-from qos.profiling.labeling import NOISE_ID, apply_labels
-from qos.profiling.profile import label_map
+from qos.model.train import ARTIFACT_FILES, CURRENT_FILE, SCHEMA, _jsonable, allocate_version
+from qos.profiling.profile import redescribe
 
-REQUIRED_FILES: tuple[str, ...] = (
-    "hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "cluster_profile.json", "train_meta.json",
-)
-COPY_FILES: tuple[str, ...] = ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "grid_results.csv", "training_sample.csv")
+LEGACY_REQUIRED: tuple[str, ...] = ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "cluster_profile.json", "train_meta.json")
+REQUIRED_FILES: tuple[str, ...] = tuple(n for n in ARTIFACT_FILES if n not in ("grid_results.csv", "training_sample.csv"))
+COPY_FILES: tuple[str, ...] = tuple(n for n in ARTIFACT_FILES if n not in ("cluster_profile.json", "train_meta.json"))
 THRESHOLD_KEYS: tuple[str, ...] = ("delay_good_ms", "delay_max_ms", "jitter_max_ms", "loss_good_pct", "loss_max_pct")
+LEGACY_MESSAGE = (
+    "Versi {v} dibuat dengan pelabelan QoS (Baik/Cukup/Buruk) dan tidak kompatibel dengan aplikasi klasterisasi murni. "
+    "Latih versi baru: python scripts/train.py --activate"
+)
 
 
 class VersionError(RuntimeError):
@@ -36,18 +38,26 @@ def active_version(cfg: dict[str, Any]) -> str | None:
     return current.read_text("utf-8").strip() if current.is_file() else None
 
 
+def is_legacy(folder: Path) -> bool:
+    """True bila artefak berasal dari pelabelan QoS lama (cluster_profile.json tanpa penanda `schema`)."""
+    path = folder / "cluster_profile.json"
+    if not path.is_file():
+        return False
+    return json.loads(path.read_text("utf-8")).get("schema") != SCHEMA
+
+
 def is_complete(folder: Path) -> bool:
-    """True jika semua berkas wajib ada."""
-    return all((folder / n).is_file() for n in REQUIRED_FILES)
+    """True jika semua berkas wajib versi klasterisasi murni ada."""
+    return all((folder / n).is_file() for n in REQUIRED_FILES) and not is_legacy(folder)
 
 
 def list_versions(cfg: dict[str, Any]) -> pd.DataFrame:
-    """Tabel semua versi lengkap (terbaru dulu): skor, asal data, versi induk bila hasil relabel, dan penanda aktif."""
+    """Tabel semua versi (terbaru dulu): skor, asal data, penanda aktif, dan `kompatibel` (False untuk versi pelabelan QoS lama)."""
     root = _root(cfg)
     active = active_version(cfg)
     rows = []
     for folder in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True) if root.is_dir() else []:
-        if not is_complete(folder):
+        if not all((folder / n).is_file() for n in LEGACY_REQUIRED):
             continue
         profile = json.loads((folder / "cluster_profile.json").read_text("utf-8"))
         meta = json.loads((folder / "train_meta.json").read_text("utf-8"))
@@ -56,21 +66,29 @@ def list_versions(cfg: dict[str, Any]) -> pd.DataFrame:
         rows.append(
             {
                 "versi": folder.name, "aktif": folder.name == active, "waktu": meta.get("timestamp"),
-                "sumber": "relabel" if "relabeled_from" in meta else src,
-                "induk": meta.get("relabeled_from"), "klaster": ev["n_clusters"],
-                "silhouette": ev["silhouette"], "chi": ev["chi"], "noise_ratio": ev["noise_ratio"],
+                "sumber": "deskripsi diperbarui" if "deskripsi_dari" in meta else src,
+                "induk": meta.get("deskripsi_dari"), "klaster": ev["n_clusters"],
+                "silhouette": ev["silhouette"], "dbcv": ev.get("dbcv"), "chi": ev["chi"], "noise_ratio": ev["noise_ratio"],
+                "kompatibel": is_complete(folder),
             }
         )
-    return pd.DataFrame(rows, columns=["versi", "aktif", "waktu", "sumber", "induk", "klaster", "silhouette", "chi", "noise_ratio"])
+    return pd.DataFrame(
+        rows, columns=["versi", "aktif", "waktu", "sumber", "induk", "klaster", "silhouette", "dbcv", "chi", "noise_ratio", "kompatibel"]
+    )
 
 
 def activate_version(cfg: dict[str, Any], version: str, monitoring_active: bool = False) -> Path:
-    """Jadikan `version` aktif (tulis current.txt secara atomik). Ditolak bila versi tak lengkap atau monitoring aktif."""
+    """Jadikan `version` aktif (tulis current.txt secara atomik).
+
+    Ditolak bila versi tak ditemukan, berasal dari pelabelan QoS lama, tidak lengkap, atau monitoring aktif.
+    """
     if monitoring_active:
         raise VersionError("Mengganti model aktif ditolak selama monitoring aktif. Hentikan sesi dulu.")
     folder = _root(cfg) / version
     if not folder.is_dir():
         raise VersionError(f"Versi {version} tidak ditemukan")
+    if is_legacy(folder):
+        raise VersionError(LEGACY_MESSAGE.format(v=version))
     if not is_complete(folder):
         raise VersionError(f"Versi {version} tidak lengkap; kurang: {[n for n in REQUIRED_FILES if not (folder / n).is_file()]}")
     current = _root(cfg) / CURRENT_FILE
@@ -81,7 +99,7 @@ def activate_version(cfg: dict[str, Any], version: str, monitoring_active: bool 
 
 
 def validate_thresholds(thresholds: dict[str, float]) -> dict[str, float]:
-    """Pastikan semua kunci ambang ada, ≥ 0, dan delay baik ≤ delay maks."""
+    """Pastikan semua kunci ambang ada, ≥ 0, dan batas baik ≤ batas maksimum."""
     missing = [k for k in THRESHOLD_KEYS if k not in thresholds]
     if missing:
         raise VersionError(f"Ambang tidak lengkap, kurang: {missing}")
@@ -95,43 +113,41 @@ def validate_thresholds(thresholds: dict[str, float]) -> dict[str, float]:
     return out
 
 
-def relabel_profile(profile_doc: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:
-    """Hitung ulang tingkat, label, kategori tindakan, dan metrik_penyebab dari `statistik_pelabelan` tersimpan.
-
-    Murni: tidak membaca data latih dan tidak menyentuh model (tanpa refit HDBSCAN).
-    """
+def redescribe_profile(profile_doc: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:
+    """Hitung ulang deskripsi ITU dari `statistik` tersimpan. Murni: tanpa data latih, tanpa menyentuh model."""
     th = validate_thresholds(thresholds)
-    clusters = []
-    for c in profile_doc["clusters"]:
-        labeled = apply_labels(c["statistik_pelabelan"], th, noise=int(c["id_klaster"]) == NOISE_ID)
-        clusters.append({**c, **labeled})
-    return {**profile_doc, "thresholds": th, "clusters": clusters, "label_map": label_map(clusters)}
+    return {**profile_doc, "thresholds": th, "clusters": redescribe(profile_doc["clusters"], th)}
 
 
-def label_changes(old_doc: dict[str, Any], new_doc: dict[str, Any]) -> pd.DataFrame:
-    """Tabel klaster dengan label lama vs baru dan penanda `berubah`."""
+def description_changes(old_doc: dict[str, Any], new_doc: dict[str, Any]) -> pd.DataFrame:
+    """Tabel klaster dengan deskripsi ringkas lama vs baru dan penanda `berubah`."""
     new = {c["id_klaster"]: c for c in new_doc["clusters"]}
     return pd.DataFrame(
         [
-            {"klaster": c["id_klaster"], "label_lama": c["label"], "label_baru": new[c["id_klaster"]]["label"],
-             "berubah": c["label"] != new[c["id_klaster"]]["label"]}
+            {
+                "klaster": c["nama"], "deskripsi_lama": c["deskripsi"]["ringkas"],
+                "deskripsi_baru": new[c["id_klaster"]]["deskripsi"]["ringkas"],
+                "berubah": c["deskripsi"]["ringkas"] != new[c["id_klaster"]]["deskripsi"]["ringkas"],
+            }
             for c in old_doc["clusters"]
         ]
     )
 
 
-def relabel_version(cfg: dict[str, Any], version: str, thresholds: dict[str, float]) -> Path:
-    """Terapkan Ulang Pelabelan: buat versi BARU dari `version` dengan ambang baru.
+def refresh_descriptions(cfg: dict[str, Any], version: str, thresholds: dict[str, float]) -> Path:
+    """Perbarui Deskripsi Klaster: buat versi BARU dari `version` dengan ambang ITU baru.
 
-    Model, scaler, PCA, dan statistik tidak berubah (disalin); hanya label yang dihitung ulang.
+    Model, scaler, PCA, centroid, dan statistik tidak berubah (disalin); hanya deskripsi yang dihitung ulang.
     Versi lama dan current.txt tidak disentuh; aktivasi dilakukan terpisah.
     """
     root = _root(cfg)
     src = root / version
+    if is_legacy(src):
+        raise VersionError(LEGACY_MESSAGE.format(v=version))
     if not is_complete(src):
         raise VersionError(f"Versi {version} tidak ditemukan atau tidak lengkap")
     old = json.loads((src / "cluster_profile.json").read_text("utf-8"))
-    new_doc = relabel_profile(old, thresholds)
+    new_doc = redescribe_profile(old, thresholds)
     meta = json.loads((src / "train_meta.json").read_text("utf-8"))
 
     new_version, out = allocate_version(root)
@@ -143,7 +159,7 @@ def relabel_version(cfg: dict[str, Any], version: str, thresholds: dict[str, flo
         {
             "model_version": new_version,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "relabeled_from": version,
+            "deskripsi_dari": version,
             "thresholds_sebelum": old["thresholds"],
             "thresholds": new_doc["thresholds"],
         }

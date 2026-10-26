@@ -35,6 +35,7 @@ def isolated_cfg(root) -> dict:
         {"artifacts_dir": str(root / "artifacts"), "reports_dir": str(root / "reports"), "logs_dir": str(root / "logs")}
     )
     cfg["hdbscan"]["grid_search"].update({"min_cluster_size": [5, 10], "min_samples": [2, 5]})
+    cfg["hdbscan"]["stability"]["n_bootstrap"] = 8
     return cfg
 
 

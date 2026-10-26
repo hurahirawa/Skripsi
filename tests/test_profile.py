@@ -1,5 +1,4 @@
-"""Uji profil klaster, pelabelan, dan Lampiran 5 (PRD §13)."""
-import itertools
+"""Uji profil klaster, deskripsi ITU, dan Lampiran 5 (PRD §13)."""
 from pathlib import Path
 
 import numpy as np
@@ -9,22 +8,19 @@ import pytest
 from qos.config import load_config
 from qos.features.extract import derive_metrics, us_to_ms
 from qos.model.evaluate import noise_ratio
-from qos.profiling.labeling import cluster_levels, join_metrics, label_cluster
+from qos.profiling.describe import BETWEEN, OVER, WITHIN, describe, position
 from qos.profiling.profile import (
     basic_stats,
     boxplot_stats,
     build_cluster_profile,
-    label_map,
-    labeling_stats,
+    extra_stats,
+    redescribe,
     percentile,
     plr_pct,
 )
 
 CFG = load_config(use_user=False)
 FIXTURE = Path(__file__).parent / "fixtures" / "lampiran_l21.csv"
-BAIK = "QoS Baik"
-BURUK_DELAY_LOSS = "QoS Buruk - Delay dan Packet Loss Melebihi Batas"
-ANOMALI = "Anomali - Delay dan Packet Loss Ekstrem"
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +55,7 @@ def test_l5_mean_dan_std_delay(profile):
 
 def test_l5_p999_jitter_dan_plr(profile):
     for cid, p999, plr in ((0, 0.92, 0.99), (1, 4.12, 22.92), (-1, 24.09, 47.11)):
-        s = by_id(profile, cid)["statistik_pelabelan"]
+        s = by_id(profile, cid)["statistik_tambahan"]
         assert s["p999_jitter_ms"] == pytest.approx(p999, abs=0.005)
         assert s["plr_pct"] == pytest.approx(plr, abs=0.005)
 
@@ -71,15 +67,14 @@ def test_l5_q1_q3_delay(profile):
         assert b["q3"] == pytest.approx(q3, abs=0.006)
 
 
-def test_l5_label(profile):
-    # K0: PLR 0,99% ≤ loss_good_pct 1% → QoS Baik (ambang loss 3 level, S1)
-    assert by_id(profile, 0)["label"] == BAIK
-    assert by_id(profile, 1)["label"] == BURUK_DELAY_LOSS
-    assert by_id(profile, -1)["label"] == ANOMALI
-    assert label_map(profile) == {"-1": ANOMALI, "0": BAIK, "1": BURUK_DELAY_LOSS}
-    assert by_id(profile, 0)["kategori_tindakan"] == "-"
-    assert by_id(profile, -1)["kategori_tindakan"] == "Investigasi Kasus Tunggal"
-    assert by_id(profile, 0)["tingkat"] == {"delay": 1, "jitter": 1, "loss": 1, "klaster": 1}
+def test_l5_deskripsi_itu_deskriptif(profile):
+    # posisi median klaster terhadap ambang ITU: deskripsi, bukan label kualitas
+    k0, k1, noise = by_id(profile, 0), by_id(profile, 1), by_id(profile, -1)
+    assert k0["deskripsi"]["metrik"]["delay"]["posisi"] == WITHIN and "delay" not in k0["metrik_melewati_ambang"]
+    assert k1["deskripsi"]["metrik"]["delay"]["posisi"] == OVER and "delay" in k1["metrik_melewati_ambang"]
+    assert "delay" in noise["metrik_melewati_ambang"] and noise["nama"] == "Noise"
+    assert k0["nama"] == "Klaster 0"
+    assert "label" not in k0 and "kategori_tindakan" not in k0
 
 
 def test_l5_fai(l21):
@@ -106,56 +101,32 @@ def test_l5_jumlah_anggota(profile):
     assert [c["jumlah_anggota"] for c in profile] == [3, 5, 2]  # urutan -1, 0, 1
 
 
-# ---- Tabel 2.3: semua kombinasi level -------------------------------------------------------------
-def _expected(levels, noise):
-    names = {"delay": "Delay", "jitter": "Jitter", "loss": "Packet Loss"}
-
-    def joined(items):
-        return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " dan " + items[-1]
-
-    if noise:
-        bad = [names[m] for m in names if levels[m] == 3]
-        return f"Anomali - {joined(bad)} Ekstrem" if bad else "Anomali"
-    t = max(levels.values())
-    if t == 1:
-        return "QoS Baik"
-    cause = [names[m] for m in names if levels[m] == t]
-    prefix, note = ("QoS Cukup - ", " Meningkat") if t == 2 else ("QoS Buruk - ", " Melebihi Batas")
-    return prefix + joined(cause) + note
+# ---- Deskripsi posisi terhadap ambang ITU ----------------------------------------------------------
+TH = CFG["thresholds"]
 
 
-@pytest.mark.parametrize("noise", [False, True])
-def test_semua_kombinasi_label(noise):
-    for d, j, l in itertools.product((1, 2, 3), (1, 3), (1, 3)):
-        levels = {"delay": d, "jitter": j, "loss": l}
-        assert label_cluster(levels, noise)[0] == _expected(levels, noise), levels
+def test_position_batas_inklusif():
+    assert position("delay", 150.0, TH) == WITHIN and position("delay", 150.1, TH) == BETWEEN
+    assert position("delay", 400.0, TH) == BETWEEN and position("delay", 400.1, TH) == OVER
+    assert position("jitter", 50.0, TH) == WITHIN and position("jitter", 50.1, TH) == OVER
+    assert position("loss", 1.0, TH) == WITHIN and position("loss", 3.0, TH) == BETWEEN and position("loss", 3.01, TH) == OVER
 
 
-def test_contoh_label_prd():
-    assert label_cluster({"delay": 2, "jitter": 1, "loss": 1})[0] == "QoS Cukup - Delay Meningkat"
-    assert label_cluster({"delay": 1, "jitter": 1, "loss": 1}) == ("QoS Baik", "-")
-    assert label_cluster({"delay": 2, "jitter": 1, "loss": 1})[1] == "Pemantauan"
-    assert label_cluster({"delay": 3, "jitter": 3, "loss": 3})[0] == (
-        "QoS Buruk - Delay, Jitter dan Packet Loss Melebihi Batas"
-    )
-    assert label_cluster({"delay": 2, "jitter": 1, "loss": 1}, noise=True)[0] == "Anomali"
+def test_describe_teks_dan_metrik_melewati_ambang():
+    d = describe(200.0, 10.0, 5.0, TH)
+    assert d["ringkas"] == "Delay 150–400 ms · Jitter ≤50 ms · Packet Loss >3 %"
+    assert d["melewati_ambang"] == ["loss"]
+    assert "200,0" not in d["teks"] and "200.0 ms (150–400 ms)" in d["teks"]
+    assert describe(1.0, 1.0, 0.0, TH)["melewati_ambang"] == []
+    assert describe(500.0, 60.0, 4.0, TH)["melewati_ambang"] == ["delay", "jitter", "loss"]
 
 
-def test_join_metrics():
-    assert join_metrics(["A"]) == "A"
-    assert join_metrics(["A", "B"]) == "A dan B"
-    assert join_metrics(["A", "B", "C"]) == "A, B dan C"
-
-
-def test_cluster_levels_batas():
-    th = CFG["thresholds"]
-    assert cluster_levels({"mean_delay_ms": 150.0, "p999_jitter_ms": 50.0, "plr_pct": 1.0}, th) == {
-        "delay": 1, "jitter": 1, "loss": 1,
-    }
-    assert cluster_levels({"mean_delay_ms": 400.0, "p999_jitter_ms": 50.1, "plr_pct": 1.01}, th) == {
-        "delay": 2, "jitter": 3, "loss": 2,
-    }
-    assert cluster_levels({"mean_delay_ms": 150.0, "p999_jitter_ms": 50.0, "plr_pct": 3.01}, th)["loss"] == 3
+def test_redescribe_memakai_ambang_baru_dari_statistik_tersimpan(profile):
+    new_th = {**TH, "delay_good_ms": 50.0, "delay_max_ms": 100.0}
+    out = redescribe(profile, new_th)
+    k0 = next(c for c in out if c["id_klaster"] == 0)
+    assert k0["deskripsi"]["metrik"]["delay"]["posisi"] == OVER  # median ~109 ms > 100 ms
+    assert k0["jumlah_anggota"] == 5 and k0["statistik"] == by_id(profile, 0)["statistik"]  # statistik tak berubah
 
 
 # ---- Fungsi dasar --------------------------------------------------------------------------------
@@ -210,7 +181,7 @@ def test_plr_pct():
         plr_pct(pd.Series([0]), pd.Series([0]))
 
 
-def test_labeling_stats_dari_config():
+def test_extra_stats_dari_config():
     df = pd.DataFrame(
         {
             "delay_ms": [10.0, 20.0],
@@ -219,7 +190,7 @@ def test_labeling_stats_dari_config():
             "bwd_packets_count": [100, 90],
         }
     )
-    s = labeling_stats(df, CFG["profiling"]["jitter_percentile"])
+    s = extra_stats(df, CFG["profiling"]["jitter_percentile"])
     assert s["mean_delay_ms"] == 15.0 and s["plr_pct"] == pytest.approx(5.0)
     assert s["p999_jitter_ms"] == pytest.approx(2.998)
 
