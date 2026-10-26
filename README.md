@@ -184,7 +184,8 @@ Setiap pelatihan membuat `artifacts/<YYYYMMDD_HHMMSS>/` dan `artifacts/current.t
 - **Latih ulang** (halaman Pengaturan atau CLI) tidak pernah menimpa versi lama dan tidak mengubah `current.txt`; versi baru aktif hanya setelah *Aktifkan model ini* (atau `--activate`).
 - **Versi lama** (pelabelan QoS, tanpa `schema: klaster_murni`) tetap ada tetapi **ditolak saat diaktifkan dan saat dimuat** dengan pesan jelas; daftar versi menandainya `kompatibel = False`.
 - **Sumber latih ulang**: CSV (Darknet/CIC) atau log jendela monitoring. Untuk log: baris *Data Belum Cukup* dan *Sinyal SIP* dikecualikan; baris di luar klaster, baris `diimputasi = true`, dan baris dengan `feature_mode` selain yang diatur (default `cumulative`) dikecualikan sesuai `retrain.log_source`; jumlah minimum baris (`min_rows`, default 200) dicek sebelum pelatihan.
-- **Perbarui Deskripsi Klaster** menghitung ulang deskripsi posisi ITU dari statistik tersimpan dengan ambang baru, **tanpa melatih ulang**, dan menghasilkan versi baru (model, centroid, batas disalin tanpa berubah).
+- Deskripsi klaster memuat median total paket, median durasi flow (detik), dan % UDP/TCP: `Klaster 2 · 32 paket · 90 dtk · Delay >400 · Jitter >50 · Loss ≤1`.
+- **Perbarui Deskripsi Klaster** menghitung ulang deskripsi posisi ITU dari statistik tersimpan (profil lama melengkapi karakter dari `training_sample.csv`) dengan ambang baru, **tanpa melatih ulang**, dan menghasilkan versi baru (model, centroid, batas disalin tanpa berubah).
 
 ## Riwayat dan ekspor
 

@@ -12,7 +12,7 @@ import pandas as pd
 
 from qos.config import resolve_path
 from qos.model.train import ARTIFACT_FILES, CURRENT_FILE, SCHEMA, _jsonable, allocate_version
-from qos.profiling.profile import redescribe
+from qos.profiling.profile import characteristics, redescribe
 
 LEGACY_REQUIRED: tuple[str, ...] = ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "cluster_profile.json", "train_meta.json")
 REQUIRED_FILES: tuple[str, ...] = tuple(n for n in ARTIFACT_FILES if n not in ("grid_results.csv", "training_sample.csv"))
@@ -113,10 +113,26 @@ def validate_thresholds(thresholds: dict[str, float]) -> dict[str, float]:
     return out
 
 
-def redescribe_profile(profile_doc: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:
-    """Hitung ulang deskripsi ITU dari `statistik` tersimpan. Murni: tanpa data latih, tanpa menyentuh model."""
+def redescribe_profile(
+    profile_doc: dict[str, Any], thresholds: dict[str, float], karakter: dict[int, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Hitung ulang deskripsi ITU dari `statistik` tersimpan. Murni: tanpa refit dan tanpa menyentuh model."""
     th = validate_thresholds(thresholds)
-    return {**profile_doc, "thresholds": th, "clusters": redescribe(profile_doc["clusters"], th)}
+    return {**profile_doc, "thresholds": th, "clusters": redescribe(profile_doc["clusters"], th, karakter)}
+
+
+def sample_characteristics(folder: Path) -> tuple[dict[int, dict[str, Any]] | None, bool]:
+    """Karakter klaster dari training_sample.csv versi `folder` (untuk profil lama tanpa `karakter`).
+
+    Kembalian: (karakter per klaster atau None bila sampel tidak ada, lengkap). `lengkap` False bila sampel adalah subsampel data latih.
+    """
+    path = folder / "training_sample.csv"
+    if not path.is_file():
+        return None, False
+    sample = pd.read_csv(path)
+    meta = json.loads((folder / "train_meta.json").read_text("utf-8"))
+    complete = len(sample) >= int(meta.get("jumlah_baris_latih", len(sample)))
+    return characteristics(sample, sample["cluster_id"].to_numpy()), complete
 
 
 def description_changes(old_doc: dict[str, Any], new_doc: dict[str, Any]) -> pd.DataFrame:
@@ -147,8 +163,12 @@ def refresh_descriptions(cfg: dict[str, Any], version: str, thresholds: dict[str
     if not is_complete(src):
         raise VersionError(f"Versi {version} tidak ditemukan atau tidak lengkap")
     old = json.loads((src / "cluster_profile.json").read_text("utf-8"))
-    new_doc = redescribe_profile(old, thresholds)
     meta = json.loads((src / "train_meta.json").read_text("utf-8"))
+    karakter, complete = (None, True)
+    if any("karakter" not in c for c in old["clusters"]):  # profil lama: karakter dihitung dari sampel latih, bukan refit
+        karakter, complete = sample_characteristics(src)
+        meta["karakter_sumber"] = "training_sample.csv" + ("" if complete else " (subsampel: perkiraan)")
+    new_doc = redescribe_profile(old, thresholds, karakter)
 
     new_version, out = allocate_version(root)
     for name in COPY_FILES:

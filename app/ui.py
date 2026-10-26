@@ -193,6 +193,9 @@ def render_connection_banner(session, art: Artifacts) -> None:
     desc = ""
     if status["klaster"] is not None:
         desc = art.descriptions.get(status["klaster"], "")
+        proto = art.profile_protocol(status["klaster"])
+        if proto:
+            desc = f"{desc} · {proto}"
         if status["di_luar"]:
             desc = f"Jauh dari semua klaster. Klaster terdekat: {desc}" if desc else "Jauh dari semua klaster."
         if status["n_aktif"] > 1:
@@ -229,6 +232,8 @@ def render_cluster_cards(counts: dict[str, int], art: Artifacts) -> None:
         color = NEUTRAL_COLOR if key == "Total Aliran Trafik" else state_color(key)
         col.markdown(f'<div style="height:5px;border-radius:3px;background:{color}"></div>', unsafe_allow_html=True)
         col.metric(key, counts.get(key, 0))
+        if key.startswith("Klaster "):
+            col.caption(art.characters.get(int(key.split()[1]), ""))
 
 
 def render_active_calls(session, art: Artifacts) -> None:

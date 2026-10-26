@@ -29,10 +29,17 @@ TABLE_COLUMNS = ["waktu_jendela", "flow_id", "delay_ms", "jitter_ms", "fwd", "bw
 
 def description_table() -> pd.DataFrame:
     """Tabel deskripsi klaster model (posisi median terhadap ambang ITU; deskriptif, bukan label)."""
-    return pd.DataFrame(
-        [{"Klaster": c["nama"], "Anggota latih": c["jumlah_anggota"], "Deskripsi": c["deskripsi"]["ringkas"]}
-         for c in art.profile["clusters"]]
-    )
+    rows = []
+    for c in art.profile["clusters"]:
+        k = c.get("karakter") or {}
+        rows.append(
+            {
+                "Klaster": c["nama"], "Anggota latih": c["jumlah_anggota"], "Median paket": k.get("paket_median"),
+                "Durasi median (dtk)": k.get("durasi_median_s"), "UDP %": k.get("persen_udp"), "TCP %": k.get("persen_tcp"),
+                "Deskripsi ITU": c["deskripsi"].get("itu", c["deskripsi"]["ringkas"]),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 @st.fragment(run_every=cfg["monitoring"]["refresh_sec"])
@@ -57,7 +64,11 @@ def live_view() -> None:
     right.subheader("Deskripsi klaster")
     right.caption("Posisi median klaster terhadap ambang ITU. Deskripsi saja, bukan label kualitas.")
     desc = description_table()
-    right.dataframe(style_by_state(desc, "Klaster"), width="stretch", hide_index=True)
+    right.dataframe(
+        style_by_state(desc, "Klaster"), width="stretch", hide_index=True,
+        column_config={"Median paket": st.column_config.NumberColumn(format="%.0f"), "Durasi median (dtk)": st.column_config.NumberColumn(format="%.1f"),
+                       "UDP %": st.column_config.NumberColumn(format="%.0f"), "TCP %": st.column_config.NumberColumn(format="%.0f")},
+    )
 
     recs = session_recommendations(rows, metric_map, rules) if len(rows) and recommendations_enabled(cfg) else []
     if recs:

@@ -91,7 +91,15 @@ for c in profile:
     for metric, (title, _) in BOX_METRICS.items():
         s = c["statistik"][metric]
         row.update({f"{title} mean": fmt(s["mean"]), f"{title} median": fmt(s["median"]), f"{title} std": fmt(s["std"])})
-    row.update({"Deskripsi ITU": c["deskripsi"]["ringkas"], "Metrik melewati ambang": ", ".join(c["metrik_melewati_ambang"]) or "-"})
+    k = c.get("karakter") or {}
+    row.update(
+        {
+            "Median total paket": fmt(k.get("paket_median"), 0), "Durasi median (dtk)": fmt(k.get("durasi_median_s"), 1),
+            "UDP %": fmt(k.get("persen_udp"), 0), "TCP %": fmt(k.get("persen_tcp"), 0),
+            "Deskripsi ITU": c["deskripsi"].get("itu", c["deskripsi"]["ringkas"]),
+            "Ringkas": c["deskripsi"]["ringkas"], "Metrik melewati ambang": ", ".join(c["metrik_melewati_ambang"]) or "-",
+        }
+    )
     table.append(row)
 st.dataframe(style_by_state(pd.DataFrame(table), "Klaster"), width="stretch", hide_index=True)
 

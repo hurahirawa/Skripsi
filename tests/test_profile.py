@@ -199,3 +199,46 @@ def test_noise_ratio():
     assert noise_ratio(np.array([-1, 0, 0, 1])) == 0.25
     with pytest.raises(ValueError):
         noise_ratio(np.array([]))
+
+
+# ---- karakter klaster: median paket, durasi, % protokol ----
+from qos.profiling.describe import character_text, protocol_text  # noqa: E402
+from qos.profiling.profile import characteristics  # noqa: E402
+
+
+def _flows():
+    return pd.DataFrame({
+        "fwd_packets_count": [10, 20, 30, 5], "bwd_packets_count": [10, 10, 10, 5],
+        "duration_us": [90e6, 100e6, 80e6, 2e6], "protocol": [17, 17, 6, 6],
+    })
+
+
+def test_characteristics_median_paket_durasi_dan_persen_protokol():
+    k = characteristics(_flows(), [1, 1, 1, -1])
+    assert k[1]["paket_median"] == 30.0 and k[1]["durasi_median_s"] == 90.0  # median (20, 30, 40) paket; (80, 90, 100) detik
+    assert k[1]["persen_udp"] == pytest.approx(200 / 3) and k[1]["persen_tcp"] == pytest.approx(100 / 3) and k[1]["persen_lain"] == pytest.approx(0)
+    assert k[-1]["paket_median"] == 10.0 and k[-1]["persen_tcp"] == 100.0
+
+
+def test_characteristics_tanpa_kolom_durasi_dan_protokol():
+    k = characteristics(_flows()[["fwd_packets_count", "bwd_packets_count"]], [1, 1, 1, 1])
+    assert k[1]["paket_median"] == 25.0 and k[1]["durasi_median_s"] is None and k[1]["persen_udp"] is None
+    d = describe(10, 1, 0, TH, "Klaster 1", k[1])
+    assert d["ringkas"] == "Klaster 1 · 25 paket · Delay ≤150 · Jitter ≤50 · Loss ≤1" and d["protokol"] == ""
+
+
+def test_ringkas_format_contoh_dan_itu_tetap():
+    k = {"paket_median": 32.0, "durasi_median_s": 90.4, "persen_udp": 92.0, "persen_tcp": 8.0, "persen_lain": 0.0}
+    d = describe(2904.0, 9006.0, 0.0, TH, "Klaster 2", k)
+    assert d["ringkas"] == "Klaster 2 · 32 paket · 90 dtk · Delay >400 · Jitter >50 · Loss ≤1"
+    assert d["itu"] == "Delay >400 ms · Jitter >50 ms · Packet Loss ≤1 %"
+    assert d["protokol"] == "UDP 92% · TCP 8%" and "protokol UDP 92% · TCP 8%" in d["teks"]
+    assert character_text({"paket_median": 11999.0, "durasi_median_s": 4.25}) == "11.999 paket · 4.2 dtk"
+    assert protocol_text(None) == "" and protocol_text({"persen_udp": 90.0, "persen_tcp": 5.0, "persen_lain": 5.0}).endswith("lain 5%")
+
+
+def test_profil_memuat_karakter_dan_redescribe_menjaganya(profile):
+    k0 = by_id(profile, 0)
+    assert k0["karakter"]["paket_median"] > 0 and k0["deskripsi"]["ringkas"].startswith("Klaster 0 · ")
+    out = redescribe(profile, {**TH, "delay_max_ms": 1.0})
+    assert next(c for c in out if c["id_klaster"] == 0)["karakter"] == k0["karakter"]

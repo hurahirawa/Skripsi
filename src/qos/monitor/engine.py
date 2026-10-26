@@ -94,6 +94,27 @@ class Artifacts:
         """Nomor klaster HDBSCAN (1..k)."""
         return sorted(self.centroids)
 
+    def profile_protocol(self, cluster: int) -> str:
+        """Komposisi protokol klaster, mis. "UDP 98% · TCP 2%" (kosong bila tidak diketahui)."""
+        from qos.profiling.describe import protocol_text
+
+        for c in self.profile["clusters"]:
+            if int(c["id_klaster"]) == cluster:
+                return protocol_text(c.get("karakter"))
+        return ""
+
+    @property
+    def characters(self) -> dict[int, str]:
+        """Nomor klaster → teks karakter "32 paket · 90 dtk · UDP 98% · TCP 2%" (kosong bila profil lama tanpa karakter)."""
+        from qos.profiling.describe import character_text, protocol_text
+
+        out = {}
+        for c in self.profile["clusters"]:
+            if int(c["id_klaster"]) != NOISE_ID:
+                k = c.get("karakter")
+                out[int(c["id_klaster"])] = " · ".join(t for t in (character_text(k), protocol_text(k)) if t)
+        return out
+
     @property
     def descriptions(self) -> dict[int, str]:
         """Nomor klaster → deskripsi ringkas posisi terhadap ambang ITU (deskriptif, bukan label)."""

@@ -122,3 +122,27 @@ def test_redescribe_profile_murni_dan_tolak_ambang_tak_valid(active_cfg):
     assert not description_changes(old, same)["berubah"].any()
     with pytest.raises(VersionError):
         redescribe_profile(old, {**old["thresholds"], "delay_good_ms": 999})
+
+
+def test_perbarui_deskripsi_profil_lama_menghitung_karakter_dari_sampel_tanpa_refit(active_cfg):
+    """Profil tanpa `karakter` (model sebelum fitur ini): karakter diturunkan dari training_sample.csv, model tidak disentuh."""
+    import pandas as pd
+
+    from qos.config import resolve_path
+
+    src = resolve_path(active_cfg["paths"]["artifacts_dir"]) / active_cfg["_active"]
+    doc = json.loads((src / "cluster_profile.json").read_text("utf-8"))
+    for c in doc["clusters"]:
+        c.pop("karakter", None)
+        c["deskripsi"]["ringkas"] = c["deskripsi"]["itu"]
+    (src / "cluster_profile.json").write_text(json.dumps(doc), "utf-8")
+    sample = pd.read_csv(src / "training_sample.csv").assign(duration_us=60e6, protocol=17)
+    sample.to_csv(src / "training_sample.csv", index=False)
+    time.sleep(1.1)
+    out = refresh_descriptions(active_cfg, src.name, doc["thresholds"])
+    new = json.loads((out / "cluster_profile.json").read_text("utf-8"))
+    assert json.loads((out / "train_meta.json").read_text("utf-8"))["karakter_sumber"] == "training_sample.csv"
+    for c in new["clusters"]:
+        assert c["karakter"]["durasi_median_s"] == 60.0 and c["karakter"]["persen_udp"] == 100.0 and c["karakter"]["paket_median"] > 0
+        assert c["deskripsi"]["ringkas"].startswith(f"{c['nama']} · ") and " dtk · " in c["deskripsi"]["ringkas"]
+    assert (out / "hdbscan_model.joblib").read_bytes() == (src / "hdbscan_model.joblib").read_bytes()
