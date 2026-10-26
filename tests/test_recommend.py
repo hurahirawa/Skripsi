@@ -1,115 +1,111 @@
-"""Uji rekomendasi rule-based (PRD FR-REC) dan konfigurasi default M7."""
-import itertools
+"""Uji saran berdasarkan karakteristik klaster (PRD FR-REC): pemicu = metrik klaster melewati ambang ITU / di luar klaster."""
+import copy
 
 import pandas as pd
 import pytest
 
 from qos.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config
-from qos.profiling.labeling import ACTIONS, label_cluster
+from qos.monitor.calls import INSUFFICIENT, SIGNALING, STATUS_CLUSTERED, STATUS_OUTSIDE
 from qos.recommend.rules import (
     RulesError,
+    call_recommendations,
+    cluster_metric_map,
     cluster_recommendations,
     load_rules,
-    metrics_from_label,
-    recommend,
+    recommend_metrics,
+    recommend_outside,
+    recommendations_enabled,
     session_recommendations,
 )
 
 RULES = load_rules(PROJECT_ROOT / "config" / "recommendations.yaml")
 SARAN = {k: RULES[k]["saran"] for k in RULES}
+METRIC_MAP = {1: [], 2: ["delay", "loss"], 3: ["jitter"]}
 
 
 def test_aturan_sesuai_tabel_prd():
-    assert RULES["delay"]["pemicu"] == "Delay Melebihi Batas"
     assert RULES["delay"]["saran"] == [
         "Perlebar bandwidth jalur VoIP", "Prioritas antrean DiffServ (EF)", "Evaluasi beban router dan jalur routing"
     ]
     assert RULES["jitter"]["saran"][0] == "Priority queuing untuk RTP"
-    assert RULES["loss"]["pemicu"] == "Packet Loss Melebihi Batas"
-    assert RULES["anomali"]["kategori"] == "Investigasi Kasus Tunggal"
+    assert RULES["di_luar_klaster"]["kategori"] == "Investigasi Kasus Tunggal"
     assert all(RULES[k]["kategori"] == "Perbaikan Kapasitas/Konfigurasi" for k in ("delay", "jitter", "loss"))
+    assert "anomali" not in RULES  # tidak ada lagi konsep Anomali
 
 
-def test_kategori_aturan_sama_dengan_kategori_tindakan_label():
-    assert RULES["delay"]["kategori"] == ACTIONS["QoS Buruk"]
-    assert RULES["anomali"]["kategori"] == ACTIONS["Anomali"]
+def test_tanpa_metrik_melewati_ambang_tidak_ada_saran():
+    assert recommend_metrics([], RULES, "Klaster 1") is None
 
 
-@pytest.mark.parametrize("label", ["QoS Baik", "QoS Cukup - Delay Meningkat", "Data Belum Cukup", ""])
-def test_tidak_ada_rekomendasi_untuk_baik_cukup_dan_data_belum_cukup(label):
-    assert recommend(label, RULES) is None
-
-
-def test_satu_metrik_penyebab():
-    rec = recommend("QoS Buruk - Jitter Melebihi Batas", RULES)
-    assert rec.triggers == ("Jitter Melebihi Batas",)
-    assert list(rec.suggestions) == SARAN["jitter"]
-    assert rec.category == "Perbaikan Kapasitas/Konfigurasi"
-
-
-def test_beberapa_metrik_menggabungkan_saran_berurutan():
-    rec = recommend("QoS Buruk - Delay dan Packet Loss Melebihi Batas", RULES)
-    assert rec.triggers == ("Delay Melebihi Batas", "Packet Loss Melebihi Batas")
-    assert list(rec.suggestions) == SARAN["delay"] + SARAN["loss"]
-    rec3 = recommend("QoS Buruk - Delay, Jitter dan Packet Loss Melebihi Batas", RULES)
-    assert list(rec3.suggestions) == SARAN["delay"] + SARAN["jitter"] + SARAN["loss"]
-
-
-def test_anomali_memakai_saran_anomali_apa_pun_metriknya():
-    for label in ("Anomali", "Anomali - Delay Ekstrem", "Anomali - Delay, Jitter dan Packet Loss Ekstrem"):
-        rec = recommend(label, RULES)
-        assert list(rec.suggestions) == SARAN["anomali"] and rec.category == "Investigasi Kasus Tunggal"
+def test_satu_dan_beberapa_metrik_menggabungkan_saran_berurutan():
+    rec = recommend_metrics(["jitter"], RULES, "Klaster 3")
+    assert rec.triggers == (RULES["jitter"]["pemicu"],) and list(rec.suggestions) == SARAN["jitter"]
+    rec2 = recommend_metrics(["loss", "delay"], RULES, "Klaster 2")  # urutan tetap delay, jitter, loss
+    assert rec2.triggers == (RULES["delay"]["pemicu"], RULES["loss"]["pemicu"])
+    assert list(rec2.suggestions) == SARAN["delay"] + SARAN["loss"]
+    assert list(recommend_metrics(["delay", "jitter", "loss"], RULES, "k").suggestions) == SARAN["delay"] + SARAN["jitter"] + SARAN["loss"]
 
 
 def test_saran_duplikat_dibuang():
     rules = {k: dict(v) for k, v in RULES.items()}
     rules["jitter"]["saran"] = [rules["delay"]["saran"][0], "Saran unik jitter"]
-    rec = recommend("QoS Buruk - Delay dan Jitter Melebihi Batas", rules)
+    rec = recommend_metrics(["delay", "jitter"], rules, "k")
     assert list(rec.suggestions).count(rules["delay"]["saran"][0]) == 1
 
 
-def test_metrics_from_label_konsisten_dengan_label_cluster():
-    """Semua kombinasi level: metrik yang di-parse = metrik berlevel 3 (Buruk) sesuai label_cluster."""
-    for d, j, l in itertools.product((1, 2, 3), (1, 3), (1, 3)):
-        levels = {"delay": d, "jitter": j, "loss": l}
-        label, _ = label_cluster(levels)
-        if max(levels.values()) == 3:
-            assert metrics_from_label(label) == [m for m in ("delay", "jitter", "loss") if levels[m] == 3]
-            assert recommend(label, RULES) is not None
-        else:
-            assert recommend(label, RULES) is None
+def test_di_luar_klaster_saran_investigasi_kasus_tunggal():
+    rec = recommend_outside(RULES)
+    assert rec.key == "Di luar klaster" and rec.category == "Investigasi Kasus Tunggal"
+    assert list(rec.suggestions) == SARAN["di_luar_klaster"]
 
 
-def test_session_recommendations_label_terakhir_dan_urutan():
+def test_cluster_metric_map_dan_cluster_recommendations_dari_profil():
+    profile = [
+        {"id_klaster": -1, "nama": "Noise", "jumlah_anggota": 3, "metrik_melewati_ambang": ["delay"]},
+        {"id_klaster": 1, "nama": "Klaster 1", "jumlah_anggota": 5, "metrik_melewati_ambang": []},
+        {"id_klaster": 2, "nama": "Klaster 2", "jumlah_anggota": 7, "metrik_melewati_ambang": ["loss"],
+         "deskripsi": {"ringkas": "Packet Loss >3 %"}},
+    ]
+    assert cluster_metric_map(profile) == {-1: ["delay"], 1: [], 2: ["loss"]}
+    recs = cluster_recommendations(profile, RULES)
+    assert [r["id_klaster"] for r in recs] == [-1, 2]  # klaster tanpa metrik melewati ambang tidak disarankan
+    assert recs[0]["saran"] == SARAN["di_luar_klaster"] and recs[1]["saran"] == SARAN["loss"] and recs[1]["jumlah_anggota"] == 7
+    assert recs[1]["deskripsi"] == "Packet Loss >3 %"
+
+
+def test_session_recommendations_status_terakhir_dan_urutan():
     rows = pd.DataFrame(
         {
-            "flow_id": ["a", "a", "b", "c", "d", "e"],
-            "label": ["QoS Baik", "QoS Buruk - Jitter Melebihi Batas", "QoS Buruk - Jitter Melebihi Batas",
-                      "Anomali", "Data Belum Cukup", "QoS Buruk - Jitter Melebihi Batas"],
+            "flow_id": ["a", "a", "b", "c", "d", "e", "f", "g"],
+            "status": [STATUS_OUTSIDE, STATUS_CLUSTERED, STATUS_CLUSTERED, STATUS_CLUSTERED, STATUS_OUTSIDE, INSUFFICIENT, SIGNALING,
+                       STATUS_CLUSTERED],
+            "klaster_terdekat": [1, 3, 3, 1, 2, pd.NA, pd.NA, 2],
         }
     )
-    recs = session_recommendations(rows, RULES)
-    assert [(r["label"], r["jumlah_flow"]) for r in recs] == [
-        ("QoS Buruk - Jitter Melebihi Batas", 3), ("Anomali", 1)
-    ]
-    assert recs[0]["saran"] == SARAN["jitter"]
-    assert session_recommendations(pd.DataFrame(columns=["flow_id", "label"]), RULES) == []
+    recs = session_recommendations(rows, METRIC_MAP, RULES)
+    # a: terakhir Klaster 3 (jitter), b: Klaster 3 (jitter), c: Klaster 1 (tanpa metrik), d: di luar klaster, g: Klaster 2 (delay, loss)
+    assert [(r["kunci"], r["jumlah_flow"]) for r in recs] == [("Klaster 3", 2), ("Di luar klaster", 1), ("Klaster 2", 1)]
+    assert recs[0]["saran"] == SARAN["jitter"] and recs[1]["saran"] == SARAN["di_luar_klaster"]
+    assert recs[2]["saran"] == SARAN["delay"] + SARAN["loss"]
+    assert session_recommendations(pd.DataFrame(columns=["flow_id", "status", "klaster_terdekat"]), METRIC_MAP, RULES) == []
 
 
-def test_session_recommendations_label_terakhir_menentukan():
-    rows = pd.DataFrame({"flow_id": ["a", "a"], "label": ["Anomali", "QoS Baik"]})
-    assert session_recommendations(rows, RULES) == []  # pulih → tidak lagi bermasalah
+def test_session_recommendations_pulih_tidak_lagi_di_luar_klaster():
+    rows = pd.DataFrame({"flow_id": ["a", "a"], "status": [STATUS_OUTSIDE, STATUS_CLUSTERED], "klaster_terdekat": [2, 1]})
+    assert session_recommendations(rows, METRIC_MAP, RULES) == []  # status terakhir: Klaster 1 tanpa metrik melewati ambang
 
 
-def test_cluster_recommendations_dari_profil():
-    profile = [
-        {"id_klaster": -1, "jumlah_anggota": 3, "label": "Anomali - Delay Ekstrem"},
-        {"id_klaster": 0, "jumlah_anggota": 5, "label": "QoS Baik"},
-        {"id_klaster": 1, "jumlah_anggota": 7, "label": "QoS Buruk - Packet Loss Melebihi Batas"},
-    ]
-    recs = cluster_recommendations(profile, RULES)
-    assert [r["id_klaster"] for r in recs] == [-1, 1]
-    assert recs[1]["saran"] == SARAN["loss"] and recs[1]["jumlah_anggota"] == 7
+def test_call_recommendations_per_panggilan():
+    calls = pd.DataFrame(
+        {
+            "flow_id": ["a", "b", "c", "d"],
+            "status_akhir": [STATUS_CLUSTERED, STATUS_CLUSTERED, STATUS_OUTSIDE, INSUFFICIENT],
+            "klaster_akhir": [1, 2, 3, pd.NA],
+        }
+    )
+    recs = call_recommendations(calls, METRIC_MAP, RULES)
+    assert [(r["flow_id"], r["kunci"]) for r in recs] == [("b", "Klaster 2"), ("c", "Di luar klaster")]
+    assert recs[1]["kategori"] == "Investigasi Kasus Tunggal"
 
 
 def test_load_rules_validasi(tmp_path):
@@ -120,11 +116,20 @@ def test_load_rules_validasi(tmp_path):
     with pytest.raises(RulesError, match="jitter"):
         load_rules(bad)
     bad.write_text(
-        "rules:\n" + "".join(f"  {k}: {{pemicu: x, kategori: y, saran: teks}}\n" for k in ("delay", "jitter", "loss", "anomali")),
+        "rules:\n" + "".join(f"  {k}: {{pemicu: x, kategori: y, saran: teks}}\n" for k in ("delay", "jitter", "loss", "di_luar_klaster")),
         encoding="utf-8",
     )
     with pytest.raises(RulesError, match="daftar"):
         load_rules(bad)
+
+
+def test_recommendations_enabled_dari_config():
+    cfg = load_config(use_user=False)
+    assert cfg["recommendations"]["enabled"] is True and recommendations_enabled(cfg)
+    off = copy.deepcopy(cfg)
+    off["recommendations"]["enabled"] = False
+    assert not recommendations_enabled(off)
+    assert recommendations_enabled({})  # tanpa blok config: default aktif
 
 
 def test_default_capture_backend_scapy_dan_bpf_tanpa_trafik_di_luar_distribusi():
@@ -135,49 +140,3 @@ def test_default_capture_backend_scapy_dan_bpf_tanpa_trafik_di_luar_distribusi()
     for port in (443, 53, 123, 5353, 1900):
         assert f"not port {port}" in bpf
     assert cfg["paths"]["recommendations_file"] == "config/recommendations.yaml"
-
-
-# ---- kolom metrik_penyebab (M8) -----------------------------------------------------------------
-def test_recommend_membaca_kolom_metrik_penyebab_bila_ada():
-    label = "QoS Buruk - Delay Melebihi Batas"
-    rec = recommend(label, RULES, causes="jitter;loss")  # kolom didahulukan atas parser teks
-    assert rec.triggers == ("Jitter Melebihi Batas", "Packet Loss Melebihi Batas")
-    assert list(rec.suggestions) == SARAN["jitter"] + SARAN["loss"]
-
-
-@pytest.mark.parametrize("causes", [None, "", float("nan"), "tidak_dikenal"])
-def test_recommend_fallback_parser_teks_untuk_data_lama(causes):
-    rec = recommend("QoS Buruk - Delay dan Jitter Melebihi Batas", RULES, causes=causes)
-    assert rec.triggers == ("Delay Melebihi Batas", "Jitter Melebihi Batas")
-
-
-def test_causes_from_column_urutan_dan_validasi():
-    from qos.recommend.rules import causes_from_column
-
-    assert causes_from_column("loss;delay") == ["delay", "loss"]  # urutan tetap
-    assert causes_from_column("delay") == ["delay"]
-    assert causes_from_column("") is None and causes_from_column(None) is None and causes_from_column(float("nan")) is None
-
-
-def test_anomali_tetap_hanya_saran_anomali_walau_ada_kolom():
-    rec = recommend("Anomali - Delay dan Packet Loss Ekstrem", RULES, causes="delay;loss")
-    assert list(rec.suggestions) == SARAN["anomali"]
-
-
-def test_session_recommendations_memakai_kolom_dan_fallback():
-    rows = pd.DataFrame(
-        {
-            "flow_id": ["a", "b", "c"],
-            "label": ["QoS Buruk - Delay Melebihi Batas", "QoS Buruk - Delay Melebihi Batas", "QoS Baik"],
-            "metrik_penyebab": ["jitter", float("nan"), ""],  # a: kolom; b: CSV lama → parser; c: baik
-        }
-    )
-    recs = {tuple(r["pemicu"]): r["jumlah_flow"] for r in session_recommendations(rows, RULES)}
-    assert recs == {("Jitter Melebihi Batas",): 1, ("Delay Melebihi Batas",): 1}
-    no_col = session_recommendations(rows.drop(columns="metrik_penyebab"), RULES)
-    assert [(r["pemicu"], r["jumlah_flow"]) for r in no_col] == [(["Delay Melebihi Batas"], 2)]
-
-
-def test_cluster_recommendations_memakai_kolom_profil():
-    profile = [{"id_klaster": 1, "jumlah_anggota": 4, "label": "QoS Buruk - Delay Melebihi Batas", "metrik_penyebab": "loss"}]
-    assert cluster_recommendations(profile, RULES)[0]["pemicu"] == ["Packet Loss Melebihi Batas"]

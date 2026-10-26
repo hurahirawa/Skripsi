@@ -98,7 +98,7 @@ def build_cluster_profile(
     prof, th = cfg["profiling"], cfg["thresholds"]
     max_out = prof["max_outliers"]
     result = []
-    for cid in sorted(ids.unique()):
+    for cid in sorted(ids.unique(), key=lambda v: (v == NOISE_ID, v)):  # Noise di urutan terakhir
         sub = df[ids == cid]
         stats = {m: basic_stats(sub[m]) for m in PROFILE_METRICS}
         desc = describe_stats(stats, th)

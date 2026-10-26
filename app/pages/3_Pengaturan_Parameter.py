@@ -1,4 +1,4 @@
-"""P3 Pengaturan Parameter & Ambang Batas: konfigurasi, latih ulang, Terapkan Ulang Pelabelan, dan versi model."""
+"""P3 Pengaturan: parameter HDBSCAN, aturan seleksi, aturan batas jarak, ambang ITU, Perbarui Deskripsi Klaster, latih ulang, versi."""
 import json
 
 import pandas as pd
@@ -6,17 +6,17 @@ import streamlit as st
 import yaml
 
 import ui
+from qos.model.assignment import RULE_TEXT, RULES
 from qos.model.retrain import InsufficientDataError, RetrainError, load_log_frame, retrain
-from qos.model.versions import VersionError, activate_version, label_changes, list_versions, relabel_version
-from qos.profiling.labeling import loss_good_pct
+from qos.model.versions import VersionError, activate_version, description_changes, list_versions, refresh_descriptions
 
 st.set_page_config(page_title="Pengaturan Parameter", page_icon="⚙️", layout="wide")
 cfg = ui.get_cfg()
 art = ui.require_artifacts(cfg)
 ui.render_sidebar(cfg, art)
 
-st.title("Pengaturan Parameter & Ambang Batas")
-h, t = cfg["hdbscan"], cfg["thresholds"]
+st.title("Pengaturan Parameter")
+h, t, a = cfg["hdbscan"], cfg["thresholds"], cfg["assignment"]
 monitoring = ui.monitoring_active()
 
 st.subheader("HDBSCAN")
@@ -24,14 +24,28 @@ c1, c2, c3 = st.columns(3)
 mcs = c1.slider("min_cluster_size", 2, 50, int(h["min_cluster_size"]))
 ms = c2.slider("min_samples", 1, 20, int(h["min_samples"]))
 grid = c3.toggle("Grid search otomatis", value=bool(h["grid_search"]["enabled"]))
+st.caption("Parameter tetap dipakai bila grid search mati atau tidak ada kandidat yang memenuhi aturan seleksi.")
+
+st.subheader("Aturan seleksi HDBSCAN (grid search)")
+st.caption("Kandidat valid memenuhi semua syarat; dipilih DBCV tertinggi (seri → Silhouette).")
+s1, s2, s3 = st.columns(3)
+max_noise = s1.number_input("Noise maksimum", min_value=0.0, max_value=1.0, value=float(h["selection"]["max_noise_ratio"]), step=0.05, format="%.2f")
+min_clusters = s2.number_input("Klaster minimum", min_value=1, max_value=20, value=int(h["selection"]["min_clusters"]), step=1)
+min_ari = s3.number_input("ARI bootstrap minimum", min_value=0.0, max_value=1.0, value=float(h["selection"]["min_ari_mean"]), step=0.05, format="%.2f")
+
+st.subheader("Aturan batas \"Di luar klaster\"")
+st.caption("Titik ditandai di luar klaster bila jaraknya ke SETIAP centroid melebihi batas klaster tersebut.")
+r1, r2 = st.columns(2)
+limit_rule = r1.selectbox("Aturan batas", list(RULES), index=list(RULES).index(a["limit_rule"]), format_func=lambda k: f"{k} — {RULE_TEXT[k]}")
+limit_pct = r2.slider("Persentil jarak", 50, 100, int(a["limit_percentile"]))
 
 st.subheader("Ambang ITU")
-default_th = art.profile["thresholds"]  # ambang saat model dilatih = default skripsi
-st.warning(
-    "Perubahan ambang ITU di sini hanya untuk **eksplorasi**. Hasil skripsi memakai ambang default "
-    "(ITU-T G.114 untuk delay; ITU-T Y.1541 Kelas 0/1 untuk jitter; ITU-T G.1010 dan panduan Cisco VoIP untuk packet loss): "
-    f"delay {default_th['delay_good_ms']:g}/{default_th['delay_max_ms']:g} ms, "
-    f"jitter {default_th['jitter_max_ms']:g} ms, loss {loss_good_pct(default_th):g}/{default_th['loss_max_pct']:g}%."
+default_th = art.profile["thresholds"]  # ambang saat model dilatih
+st.info(
+    "Ambang ITU **tidak memengaruhi klasterisasi atau penugasan**. Ambang hanya dipakai untuk deskripsi klaster, garis referensi grafik, "
+    "dan saran. Default: ITU-T G.114 (delay), ITU-T Y.1541 Kelas 0/1 (jitter), ITU-T G.1010 dan panduan Cisco VoIP (packet loss): "
+    f"delay {default_th['delay_good_ms']:g}/{default_th['delay_max_ms']:g} ms, jitter {default_th['jitter_max_ms']:g} ms, "
+    f"loss {default_th['loss_good_pct']:g}/{default_th['loss_max_pct']:g}%."
 )
 d1, d2, d3, d4, d5 = st.columns(5)
 delay_good = d1.number_input("Delay baik (ms)", min_value=0.0, value=float(t["delay_good_ms"]))
@@ -52,7 +66,12 @@ if loss_good > loss_max:
 for e in errors:
     st.error(e)
 
-overrides = {"hdbscan": {"min_cluster_size": mcs, "min_samples": ms, "grid_search": {"enabled": grid}}, "thresholds": thresholds}
+selection = {"max_noise_ratio": max_noise, "min_clusters": int(min_clusters), "min_ari_mean": min_ari}
+overrides = {
+    "hdbscan": {"min_cluster_size": mcs, "min_samples": ms, "grid_search": {"enabled": grid}, "selection": selection},
+    "assignment": {"limit_rule": limit_rule, "limit_percentile": limit_pct},
+    "thresholds": thresholds,
+}
 b1, b2 = st.columns(2)
 if b1.button("Save Configuration", type="primary", disabled=bool(errors)):
     path = ui.user_config_path()
@@ -68,7 +87,7 @@ if b2.button("Reset to Default"):
 
 
 def activate_button(version: str, key: str) -> None:
-    """Tombol "Aktifkan model ini": menulis current.txt (ditolak selama monitoring aktif)."""
+    """Tombol "Aktifkan model ini": menulis current.txt (ditolak selama monitoring aktif atau untuk versi pelabelan QoS lama)."""
     help_text = "Dinonaktifkan selama monitoring aktif" if monitoring else None
     if st.button("Aktifkan model ini", key=key, disabled=monitoring, help=help_text):
         try:
@@ -76,35 +95,36 @@ def activate_button(version: str, key: str) -> None:
         except VersionError as exc:
             st.error(str(exc))
             return
-        for k in ("retrain_result", "relabel_result"):
+        for k in ("retrain_result", "describe_result"):
             st.session_state.pop(k, None)
         st.success(f"Model aktif sekarang: {version}")
         st.rerun()
 
 
-# ---------------------------------------------------------------- Terapkan Ulang Pelabelan
+# ------------------------------------------------------------------ Perbarui Deskripsi Klaster
 st.divider()
-st.subheader("Terapkan Ulang Pelabelan")
+st.subheader("Perbarui Deskripsi Klaster")
 st.caption(
-    f"Menghitung ulang label dari statistik tersimpan model aktif ({art.version}) dengan ambang di atas, "
-    "**tanpa melatih ulang HDBSCAN**. Hasilnya versi baru; model aktif tidak berubah sampai Anda mengaktifkannya."
+    f"Menghitung ulang deskripsi posisi klaster terhadap ambang ITU dari statistik tersimpan model aktif ({art.version}), "
+    "**tanpa melatih ulang** (model, centroid, dan batas jarak tidak berubah). Hasilnya versi baru; model aktif tidak berubah "
+    "sampai Anda mengaktifkannya."
 )
-if st.button("Terapkan Ulang Pelabelan", disabled=bool(errors)):
+if st.button("Perbarui Deskripsi Klaster", disabled=bool(errors)):
     try:
-        out = relabel_version(cfg, art.version, thresholds)
+        out = refresh_descriptions(cfg, art.version, thresholds)
         new_doc = json.loads((out / "cluster_profile.json").read_text("utf-8"))
-        st.session_state["relabel_result"] = {
-            "version": out.name, "changes": label_changes(art.profile, new_doc), "thresholds": new_doc["thresholds"],
+        st.session_state["describe_result"] = {
+            "version": out.name, "changes": description_changes(art.profile, new_doc), "thresholds": new_doc["thresholds"],
         }
     except VersionError as exc:
         st.error(str(exc))
-res = st.session_state.get("relabel_result")
+res = st.session_state.get("describe_result")
 if res:
     st.success(f"Versi baru dibuat: {res['version']} (ambang {res['thresholds']})")
     st.dataframe(res["changes"], width="stretch", hide_index=True)
     if not res["changes"]["berubah"].any():
-        st.info("Tidak ada label yang berubah dengan ambang ini.")
-    activate_button(res["version"], "act_relabel")
+        st.info("Tidak ada deskripsi yang berubah dengan ambang ini.")
+    activate_button(res["version"], "act_describe")
 
 # ------------------------------------------------------------------------- Latih ulang
 st.divider()
@@ -115,7 +135,7 @@ log_ok = True
 if source == "log":
     opt = cfg["retrain"]["log_source"]
     st.caption(
-        f"Log dipakai dengan pengecualian: Data Belum Cukup (wajib), Anomali ({'ya' if opt['exclude_anomaly'] else 'tidak'}); "
+        f"Log dipakai dengan pengecualian: Data Belum Cukup (wajib), di luar klaster ({'ya' if opt['exclude_outside_cluster'] else 'tidak'}); "
         f"{'satu baris per flow' if opt['per_flow'] == 'last' else 'semua jendela'}; minimum {opt['min_rows']} baris."
     )
     try:
@@ -133,7 +153,10 @@ if monitoring:
 confirm_retrain = st.checkbox("Saya mengerti ini membuat versi model baru", key="confirm_retrain", disabled=monitoring)
 if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not log_ok or not confirm_retrain):
     bar = st.progress(0.0, text="Melatih model…")
-    params = {"min_cluster_size": mcs, "min_samples": ms, "grid_enabled": grid, "thresholds": thresholds}
+    params = {
+        "min_cluster_size": mcs, "min_samples": ms, "grid_enabled": grid, "thresholds": thresholds, "selection": selection,
+        "limit_rule": limit_rule, "limit_percentile": limit_pct,
+    }
 
     def on_progress(done: int, total: int) -> None:
         bar.progress(done / total, text=f"Grid search {done}/{total}")
@@ -154,14 +177,15 @@ if res:
     st.success(
         f"Versi baru: {res['version']} (belum aktif) · parameter {res['params']['min_cluster_size']}/{res['params']['min_samples']}"
     )
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     sil = "-" if pd.isna(ev["silhouette"]) else f"{ev['silhouette']:.4f}"
     m1.metric("Silhouette", sil, ev["silhouette_label"], delta_color="off")
-    m2.metric("CHI", "-" if pd.isna(ev["chi"]) else f"{ev['chi']:,.2f}")
-    m3.metric("Noise Ratio", f"{ev['noise_ratio']:.2%}")
-    m4.metric("Klaster", ev["n_clusters"])
+    m2.metric("DBCV", "-" if pd.isna(ev["dbcv"]) else f"{ev['dbcv']:.4f}")
+    m3.metric("CHI", "-" if pd.isna(ev["chi"]) else f"{ev['chi']:,.2f}")
+    m4.metric("Noise Ratio", f"{ev['noise_ratio']:.2%}")
+    m5.metric("Klaster", ev["n_clusters"])
     st.dataframe(
-        pd.DataFrame([{"klaster": c["id_klaster"], "n": c["jumlah_anggota"], "label": c["label"]} for c in res["profile"]]),
+        pd.DataFrame([{"klaster": c["nama"], "n": c["jumlah_anggota"], "deskripsi": c["deskripsi"]["ringkas"]} for c in res["profile"]]),
         width="stretch", hide_index=True,
     )
     activate_button(res["version"], "act_retrain")
@@ -171,6 +195,8 @@ st.divider()
 st.subheader("Versi model")
 versions = list_versions(cfg)
 st.dataframe(versions.fillna({"induk": "-"}), width="stretch", hide_index=True)
+if not versions["kompatibel"].all():
+    st.caption("Versi dengan *kompatibel* = False dibuat dengan pelabelan QoS lama dan ditolak saat diaktifkan.")
 inactive = versions[~versions["aktif"]]["versi"].tolist()
 if inactive:
     pick = st.selectbox("Aktifkan versi lain", inactive)

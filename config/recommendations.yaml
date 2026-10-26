@@ -1,29 +1,30 @@
-# Aturan rekomendasi mitigasi (PRD FR-REC). Hanya untuk "QoS Buruk" dan "Anomali".
-# Klaster dengan beberapa metrik penyebab menggabungkan saran semua metrik (urutan: delay, jitter, loss).
+# Saran berdasarkan karakteristik klaster (PRD FR-REC). Dipicu oleh metrik klaster yang melewati ambang ITU (median klaster
+# > batas maksimum) dan oleh titik "Di luar klaster". Bukan label kualitas. Matikan lewat recommendations.enabled di config.
+# Klaster dengan beberapa metrik yang melewati ambang menggabungkan saran semua metrik (urutan: delay, jitter, loss).
 rules:
   delay:
-    pemicu: Delay Melebihi Batas
+    pemicu: Delay melewati ambang ITU
     kategori: Perbaikan Kapasitas/Konfigurasi
     saran:
       - Perlebar bandwidth jalur VoIP
       - Prioritas antrean DiffServ (EF)
       - Evaluasi beban router dan jalur routing
   jitter:
-    pemicu: Jitter Melebihi Batas
+    pemicu: Jitter melewati ambang ITU
     kategori: Perbaikan Kapasitas/Konfigurasi
     saran:
       - Priority queuing untuk RTP
       - Periksa kongesti/buffer antrean
       - Sesuaikan jitter buffer endpoint
   loss:
-    pemicu: Packet Loss Melebihi Batas
+    pemicu: Packet loss (FAI) melewati ambang ITU
     kategori: Perbaikan Kapasitas/Konfigurasi
     saran:
       - Periksa utilisasi antrean dan buffer router
       - Periksa error interface
       - Periksa kualitas media transmisi
-  anomali:
-    pemicu: Anomali
+  di_luar_klaster:
+    pemicu: Di luar klaster
     kategori: Investigasi Kasus Tunggal
     saran:
       - Periksa potensi flood/burst

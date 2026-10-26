@@ -19,12 +19,8 @@ import streamlit as st  # noqa: E402
 
 from qos.capture import sniffer  # noqa: E402
 from qos.capture.sniffer import LIVE_BACKENDS, CaptureError, iter_pcap  # noqa: E402
-from qos.recommend.rules import load_rules  # noqa: E402
 from qos.config import DEFAULT_CONFIG_PATH, USER_CONFIG_NAME, load_config, resolve_path, setup_logging  # noqa: E402
-from qos.monitor.calls import call_title, call_toast_message  # noqa: E402
-from qos.viz.plots import LABEL_COLORS  # noqa: E402
-from qos.monitor.recover import recover_orphan_sessions  # noqa: E402
-from qos.viz.plots import style_by_label  # noqa: E402
+from qos.monitor.calls import call_state_text, call_title, call_toast_message  # noqa: E402
 from qos.monitor.engine import (  # noqa: E402
     Artifacts,
     InferenceEngine,
@@ -33,6 +29,9 @@ from qos.monitor.engine import (  # noqa: E402
     connection_status,
     load_artifacts,
 )
+from qos.monitor.recover import recover_orphan_sessions  # noqa: E402
+from qos.recommend.rules import load_rules  # noqa: E402
+from qos.viz.plots import NEUTRAL_COLOR, OUTSIDE_COLOR, cluster_color, distance_bars, state_color, style_by_state  # noqa: E402
 
 logger = logging.getLogger(__name__)
 CONFIG_ENV = "QOS_CONFIG"          # path config alternatif (dipakai uji)
@@ -132,49 +131,76 @@ def drain_calls() -> pd.DataFrame:
     return calls
 
 
-COMPACT_CALL_COLUMNS = ["waktu_selesai", "pasangan", "durasi_s", "label_akhir", "label_terburuk"]
+COMPACT_CALL_COLUMNS = ["waktu_selesai", "pasangan", "durasi_s", "klaster", "jarak_akhir", "persen_di_luar_klaster"]
 CALL_COLUMN_CONFIG = {
     "waktu_selesai": st.column_config.TextColumn("Selesai", width=145),
     "pasangan": st.column_config.TextColumn("Pasangan alamat", width=165, help="flow_id lengkap ada di Detail"),
     "durasi_s": st.column_config.NumberColumn("Durasi (s)", format="%.1f", width=70),
-    "label_akhir": st.column_config.TextColumn("Label akhir", width=320),
-    "label_terburuk": st.column_config.TextColumn("Label terburuk", width=320),
+    "klaster": st.column_config.TextColumn("Klaster akhir", width=240),
+    "jarak_akhir": st.column_config.NumberColumn("Jarak", format="%.3f", width=70),
+    "persen_di_luar_klaster": st.column_config.NumberColumn("% jendela di luar", format="%.0f", width=110),
 }
 
 
 def show_calls_table(calls: pd.DataFrame, newest_first: bool = True) -> None:
-    """Tabel panggilan ringkas berwarna menurut label_akhir; kolom lengkap di expander "Detail"."""
+    """Tabel panggilan ringkas berwarna menurut klaster akhir; kolom lengkap di expander "Detail"."""
     shown = calls.iloc[::-1] if newest_first else calls
-    compact = shown.assign(pasangan=shown["flow_id"].map(call_title))[COMPACT_CALL_COLUMNS]
-    st.dataframe(
-        style_by_label(compact, "label_akhir"), column_config=CALL_COLUMN_CONFIG, width="stretch", hide_index=True
-    )
+    compact = shown.assign(
+        pasangan=shown["flow_id"].map(call_title),
+        klaster=[call_state_text(str(s), c if not pd.isna(c) else 0) for s, c in zip(shown["status_akhir"], shown["klaster_akhir"])],
+    )[COMPACT_CALL_COLUMNS]
+    st.dataframe(style_by_state(compact, "klaster"), column_config=CALL_COLUMN_CONFIG, width="stretch", hide_index=True)
     with st.expander("Detail"):
         st.dataframe(shown, width="stretch", hide_index=True)
 
 
-WAITING_COLOR = "#6B7280"
-DARK_TEXT_CATEGORIES = ("QoS Cukup", "Data Belum Cukup")  # latar terang → teks gelap
 CARDS_PER_ROW = 3
 SPARK_BLOCK = "■"
 
 
-def _badge(text: str, category: str) -> str:
-    """Badge HTML berwarna menurut kategori label."""
-    color = LABEL_COLORS.get(category, WAITING_COLOR)
-    fg = "#111827" if category in DARK_TEXT_CATEGORIES else "#FFFFFF"
-    return f'<span style="background:{color};color:{fg};padding:2px 10px;border-radius:12px;font-weight:600">{html.escape(text)}</span>'
+def _foreground(color: str) -> str:
+    """Warna teks (gelap/putih) yang terbaca di atas latar `color` (luminans relatif)."""
+    r, g, b = (int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return "#111827" if 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.55 else "#FFFFFF"
 
 
-def render_connection_banner(session) -> None:
-    """Banner besar "Status Koneksi Saat Ini": label terparah di antara panggilan aktif pada jendela terakhir."""
-    label, category = connection_status(session.active_calls() if session is not None else [])
-    color = LABEL_COLORS.get(category, WAITING_COLOR)
-    fg = "#111827" if category in DARK_TEXT_CATEGORIES else "#FFFFFF"
+def _badge(text: str, color: str) -> str:
+    """Badge HTML berwarna."""
+    return (
+        f'<span style="background:{color};color:{_foreground(color)};padding:2px 10px;border-radius:12px;'
+        f'font-weight:600">{html.escape(text)}</span>'
+    )
+
+
+def banner_color(status: dict) -> str:
+    """Warna banner: warna klaster, abu-abu tua untuk di luar klaster, abu-abu netral selain itu."""
+    if status["di_luar"]:
+        return OUTSIDE_COLOR
+    return cluster_color(status["klaster"]) if status["klaster"] is not None else NEUTRAL_COLOR
+
+
+def banner_text(status: dict) -> str:
+    """Judul banner: "Status Saat Ini: paling dekat ke Klaster N (jarak X)", varian di luar klaster, atau status tunggu."""
+    if status["klaster"] is None:
+        return f"Status Saat Ini: {status['teks']}"
+    return f"Status Saat Ini: {status['teks']} (jarak {status['jarak']:.2f})"
+
+
+def render_connection_banner(session, art: Artifacts) -> None:
+    """Banner "Status Saat Ini: paling dekat ke Klaster N (jarak X)" + deskripsi singkat klaster; murni deskriptif."""
+    status = connection_status(session.active_calls() if session is not None else [])
+    color = banner_color(status)
+    desc = ""
+    if status["klaster"] is not None:
+        desc = art.descriptions.get(status["klaster"], "")
+        if status["di_luar"]:
+            desc = f"Jauh dari semua klaster. Klaster terdekat: {desc}" if desc else "Jauh dari semua klaster."
+        if status["n_aktif"] > 1:
+            desc += f" · {status['n_kelompok']} dari {status['n_aktif']} panggilan aktif"
     st.markdown(
-        f'<div style="background:{color};color:{fg};padding:1rem 1.4rem;border-radius:.7rem;margin-bottom:.6rem">'
-        f'<div style="font-size:.9rem;opacity:.85">Status Koneksi Saat Ini</div>'
-        f'<div style="font-size:2.1rem;font-weight:700;line-height:1.2">{html.escape(label)}</div></div>',
+        f'<div style="background:{color};color:{_foreground(color)};padding:1rem 1.4rem;border-radius:.7rem;margin-bottom:.6rem">'
+        f'<div style="font-size:2.1rem;font-weight:700;line-height:1.2">{html.escape(banner_text(status))}</div>'
+        f'<div style="font-size:.9rem;opacity:.9">{html.escape(desc)}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -196,8 +222,17 @@ def render_capture_status(cfg: dict, session) -> None:
         )
 
 
-def render_active_calls(session) -> None:
-    """Panel "Panggilan Aktif": satu kartu per flow aktif (bukan Sinyal SIP) dengan sparkline kategori per jendela."""
+def render_cluster_cards(counts: dict[str, int], art: Artifacts) -> None:
+    """Kartu jumlah flow: Total, tiap klaster (palet kategorikal), dan Di luar klaster (abu-abu)."""
+    keys = ["Total Aliran Trafik", *[f"Klaster {c}" for c in art.cluster_ids], "Di luar klaster"]
+    for col, key in zip(st.columns(len(keys)), keys):
+        color = NEUTRAL_COLOR if key == "Total Aliran Trafik" else state_color(key)
+        col.markdown(f'<div style="height:5px;border-radius:3px;background:{color}"></div>', unsafe_allow_html=True)
+        col.metric(key, counts.get(key, 0))
+
+
+def render_active_calls(session, art: Artifacts) -> None:
+    """Panel "Panggilan Aktif": klaster terdekat, jarak, bar jarak ke semua centroid, dan sparkline klaster per jendela."""
     st.subheader("Panggilan Aktif")
     calls = session.active_calls() if session is not None else []
     if not calls:
@@ -207,14 +242,21 @@ def render_active_calls(session) -> None:
         for col, call in zip(st.columns(CARDS_PER_ROW), calls[start:start + CARDS_PER_ROW]):
             with col.container(border=True):
                 st.markdown(f"**{call_title(call['flow_id'])}**")
-                st.markdown(_badge(call["label"], call["kategori"]), unsafe_allow_html=True)
+                text = call_state_text(call["status"], call["klaster"]) if call["klaster"] is not None else call["status"]
+                st.markdown(_badge(text, state_color(call["kunci"])), unsafe_allow_html=True)
+                if call["klaster"] is not None:
+                    limit = art.limits.get(call["klaster"])
+                    st.caption(f"Jarak ke centroid terdekat {call['jarak']:.3f}" + (f" (batas {limit:.3f})" if limit is not None else ""))
+                    st.plotly_chart(
+                        distance_bars(call["jarak_ke_klaster"], art.limits, call["klaster"], height=24 * len(call["jarak_ke_klaster"]) + 50),
+                        width="stretch", key=f"dist_{call['flow_id']}", config={"displayModeBar": False},
+                    )
                 st.caption(
                     f"Durasi {call['durasi_s']:.0f} dtk · delay {call['delay_ms']:.1f} ms · "
                     f"jitter {call['jitter_ms']:.1f} ms · FAI {call['fai_pct']:.2f}%"
                 )
                 spark = "".join(
-                    f'<span style="color:{LABEL_COLORS.get(c, WAITING_COLOR)}" title="{html.escape(c)}">{SPARK_BLOCK}</span>'
-                    for c in call["riwayat"]
+                    f'<span style="color:{state_color(c)}" title="{html.escape(c)}">{SPARK_BLOCK}</span>' for c in call["riwayat"]
                 )
                 st.markdown(f'<div style="font-size:1.1rem;letter-spacing:2px">{spark}</div>', unsafe_allow_html=True)
 

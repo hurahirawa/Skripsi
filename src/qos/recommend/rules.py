@@ -1,4 +1,8 @@
-"""Rekomendasi mitigasi rule-based (PRD FR-REC); aturan dibaca dari config/recommendations.yaml."""
+"""Saran berdasarkan karakteristik klaster (PRD FR-REC); aturan dibaca dari config/recommendations.yaml.
+
+Pemicu: metrik klaster yang melewati ambang ITU (deskripsi, bukan label kualitas) dan titik "Di luar klaster".
+Dimatikan lewat config `recommendations.enabled`.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,17 +12,12 @@ from typing import Any, Iterable
 import pandas as pd
 import yaml
 
-from qos.profiling.labeling import (
-    CATEGORY_ANOMALI,
-    CATEGORY_BURUK,
-    CAUSE_SEPARATOR,
-    METRIC_NAMES,
-)
+from qos.monitor.calls import OUTSIDE_KEY, STATUS_CLUSTERED, STATUS_OUTSIDE
+from qos.profiling.describe import METRICS
 
-RULE_KEYS: tuple[str, ...] = ("delay", "jitter", "loss", "anomali")
-METRIC_ORDER: tuple[str, ...] = tuple(METRIC_NAMES)  # delay, jitter, loss
-NAME_TO_METRIC: dict[str, str] = {v: k for k, v in METRIC_NAMES.items()}
-EXCEEDED_SUFFIX = " Melebihi Batas"
+RULE_KEYS: tuple[str, ...] = (*METRICS, "di_luar_klaster")
+TITLE = "Saran berdasarkan karakteristik klaster"
+NOISE_ID = -1
 
 
 class RulesError(ValueError):
@@ -27,12 +26,17 @@ class RulesError(ValueError):
 
 @dataclass(frozen=True)
 class Recommendation:
-    """Rekomendasi untuk satu label: pemicu, kategori tindakan, dan daftar saran (tanpa duplikat)."""
+    """Saran untuk satu klaster atau kelompok "Di luar klaster": pemicu, jenis tindakan, dan saran (tanpa duplikat)."""
 
-    label: str
+    key: str
     category: str
     triggers: tuple[str, ...]
     suggestions: tuple[str, ...]
+
+
+def recommendations_enabled(cfg: dict[str, Any]) -> bool:
+    """True bila config recommendations.enabled (default true)."""
+    return bool(cfg.get("recommendations", {}).get("enabled", True))
 
 
 def load_rules(path: str | Path) -> dict[str, dict[str, Any]]:
@@ -50,89 +54,83 @@ def load_rules(path: str | Path) -> dict[str, dict[str, Any]]:
     return rules
 
 
-def metrics_from_label(label: str) -> list[str]:
-    """Kunci metrik penyebab (delay/jitter/loss) dari label "QoS Buruk - A, B dan C Melebihi Batas"."""
-    body = label.split(" - ", 1)[1] if " - " in label else ""
-    body = body.removesuffix(EXCEEDED_SUFFIX)
-    names = [n.strip() for n in body.replace(" dan ", ", ").split(",") if n.strip()]
-    found = {NAME_TO_METRIC[n] for n in names if n in NAME_TO_METRIC}
-    return [m for m in METRIC_ORDER if m in found]
-
-
-def causes_from_column(value: Any) -> list[str] | None:
-    """Parse kolom `metrik_penyebab` ("delay;loss") menjadi daftar kunci; None bila kosong/tidak ada (CSV lama)."""
-    if value is None or (isinstance(value, float) and pd.isna(value)) or str(value).strip() == "":
-        return None
-    keys = [k for k in str(value).split(CAUSE_SEPARATOR) if k in METRIC_ORDER]
-    return [m for m in METRIC_ORDER if m in keys] or None
-
-
-def recommend(label: str, rules: dict[str, dict[str, Any]], causes: Any = None) -> Recommendation | None:
-    """Rekomendasi untuk `label`; None untuk QoS Baik, QoS Cukup, dan Data Belum Cukup.
-
-    QoS Buruk: gabungan saran semua metrik penyebab (urutan delay, jitter, loss). Metrik dibaca dari
-    `causes` (kolom metrik_penyebab) bila ada; parser teks label hanya fallback untuk data lama.
-    Anomali: hanya saran aturan `anomali` (Lampiran 5).
-    """
-    if label.startswith(CATEGORY_ANOMALI):
-        r = rules["anomali"]
-        return Recommendation(label, r["kategori"], (r["pemicu"],), tuple(r["saran"]))
-    if not label.startswith(CATEGORY_BURUK):
-        return None
-    metrics = causes_from_column(causes) or metrics_from_label(label)
-    if not metrics:
+def recommend_metrics(metrics: Iterable[str], rules: dict[str, dict[str, Any]], key: str) -> Recommendation | None:
+    """Saran gabungan untuk metrik yang melewati ambang (urutan delay, jitter, loss); None bila tidak ada metrik."""
+    ordered = [m for m in METRICS if m in set(metrics)]
+    if not ordered:
         return None
     suggestions: list[str] = []
-    for m in metrics:
+    for m in ordered:
         suggestions += [s for s in rules[m]["saran"] if s not in suggestions]
-    return Recommendation(
-        label, rules[metrics[0]]["kategori"], tuple(rules[m]["pemicu"] for m in metrics), tuple(suggestions)
-    )
+    return Recommendation(key, rules[ordered[0]]["kategori"], tuple(rules[m]["pemicu"] for m in ordered), tuple(suggestions))
 
 
-def session_recommendations(rows: pd.DataFrame, rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rekomendasi tingkat sesi dari baris jendela: label terakhir tiap flow → kelompok per label bermasalah.
+def recommend_outside(rules: dict[str, dict[str, Any]], key: str = OUTSIDE_KEY) -> Recommendation:
+    """Saran investigasi kasus tunggal untuk titik di luar semua klaster."""
+    r = rules["di_luar_klaster"]
+    return Recommendation(key, r["kategori"], (r["pemicu"],), tuple(r["saran"]))
 
-    Kembalian terurut dari yang paling banyak flow-nya; tiap item: label, jumlah_flow, kategori, pemicu, saran.
-    """
-    if rows.empty:
-        return []
-    cols = ["label", "metrik_penyebab"] if "metrik_penyebab" in rows.columns else ["label"]
-    last = rows.groupby("flow_id", sort=False)[cols].last()
-    if "metrik_penyebab" not in last.columns:
-        last["metrik_penyebab"] = None
-    out = []
-    for (label, causes), n in last.fillna({"metrik_penyebab": ""}).value_counts().items():
-        rec = recommend(str(label), rules, causes)
-        if rec is not None:
-            out.append(
-                {"label": rec.label, "jumlah_flow": int(n), "kategori": rec.category,
-                 "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
-            )
-    return out
+
+def cluster_metric_map(profile: Iterable[dict[str, Any]]) -> dict[int, list[str]]:
+    """Nomor klaster → metrik yang melewati ambang ITU (dari `metrik_melewati_ambang` di profil)."""
+    return {int(c["id_klaster"]): list(c.get("metrik_melewati_ambang", [])) for c in profile}
 
 
 def cluster_recommendations(profile: Iterable[dict[str, Any]], rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rekomendasi per klaster bermasalah pada profil model (QoS Buruk dan Anomali)."""
+    """Saran per klaster pada profil model: klaster yang ada metrik melewati ambang; Noise latih → investigasi kasus tunggal."""
     out = []
     for c in profile:
-        rec = recommend(c["label"], rules, c.get("metrik_penyebab"))
+        cid = int(c["id_klaster"])
+        rec = recommend_outside(rules, "Noise") if cid == NOISE_ID else recommend_metrics(c.get("metrik_melewati_ambang", []), rules, f"Klaster {cid}")
         if rec is not None:
             out.append(
-                {"id_klaster": c["id_klaster"], "jumlah_anggota": c["jumlah_anggota"], "label": rec.label,
-                 "kategori": rec.category, "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
+                {"id_klaster": cid, "nama": c.get("nama", rec.key), "jumlah_anggota": c["jumlah_anggota"], "kategori": rec.category,
+                 "pemicu": list(rec.triggers), "saran": list(rec.suggestions), "deskripsi": c.get("deskripsi", {}).get("ringkas", "")}
             )
     return out
 
 
-def call_recommendations(calls: pd.DataFrame, rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rekomendasi per panggilan bermasalah (label_akhir QoS Buruk atau Anomali) dari tabel panggilan."""
+def _state_recommendation(
+    status: Any, cluster: Any, metric_map: dict[int, list[str]], rules: dict[str, dict[str, Any]]
+) -> Recommendation | None:
+    if status == STATUS_OUTSIDE:
+        return recommend_outside(rules)
+    if status == STATUS_CLUSTERED and not pd.isna(cluster):
+        return recommend_metrics(metric_map.get(int(cluster), []), rules, f"Klaster {int(cluster)}")
+    return None
+
+
+def session_recommendations(
+    rows: pd.DataFrame, metric_map: dict[int, list[str]], rules: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Saran tingkat sesi dari baris jendela: status terakhir tiap flow dikelompokkan per klaster / Di luar klaster.
+
+    Kembalian terurut dari yang paling banyak flow-nya; tiap item: kunci, jumlah_flow, kategori, pemicu, saran.
+    """
+    if rows.empty:
+        return []
+    last = rows.groupby("flow_id", sort=False)[["status", "klaster_terdekat"]].last()
+    counts: dict[str, list] = {}
+    for status, cluster in zip(last["status"], last["klaster_terdekat"]):
+        rec = _state_recommendation(status, cluster, metric_map, rules)
+        if rec is not None:
+            counts.setdefault(rec.key, [rec, 0])[1] += 1
+    items = sorted(counts.values(), key=lambda rn: -rn[1])
+    return [
+        {"kunci": rec.key, "jumlah_flow": n, "kategori": rec.category, "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
+        for rec, n in items
+    ]
+
+
+def call_recommendations(
+    calls: pd.DataFrame, metric_map: dict[int, list[str]], rules: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Saran per panggilan dari tabel panggilan: yang klaster akhirnya punya metrik melewati ambang, atau di luar klaster."""
     out = []
-    for row in calls.fillna({"metrik_penyebab": ""}).itertuples():
-        rec = recommend(str(row.label_akhir), rules, row.metrik_penyebab)
+    for row in calls.itertuples():
+        rec = _state_recommendation(row.status_akhir, row.klaster_akhir, metric_map, rules)
         if rec is not None:
             out.append(
-                {"flow_id": row.flow_id, "label": rec.label, "kategori": rec.category,
-                 "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
+                {"flow_id": row.flow_id, "kunci": rec.key, "kategori": rec.category, "pemicu": list(rec.triggers), "saran": list(rec.suggestions)}
             )
     return out

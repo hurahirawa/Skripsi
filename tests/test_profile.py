@@ -98,7 +98,7 @@ def test_l5_noise_ratio(l21):
 
 
 def test_l5_jumlah_anggota(profile):
-    assert [c["jumlah_anggota"] for c in profile] == [3, 5, 2]  # urutan -1, 0, 1
+    assert [c["jumlah_anggota"] for c in profile] == [5, 2, 3]  # urutan 0, 1, lalu Noise (-1) di akhir
 
 
 # ---- Deskripsi posisi terhadap ambang ITU ----------------------------------------------------------
