@@ -79,7 +79,7 @@ def main() -> int:
     print(f"Kartu: {session.card_counts()}")
     if session.window_csv.exists():
         rows = pd.read_csv(session.window_csv)
-        print(rows.groupby("label").size().rename("jumlah_jendela").to_string())
+        print(rows.groupby("status").size().rename("jumlah_jendela").to_string())
     print(f"CSV jendela: {session.window_csv}\nRingkasan: {summary}")
     return 0
 

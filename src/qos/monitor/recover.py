@@ -10,7 +10,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from qos.config import resolve_path
-from qos.monitor.calls import CALL_COLUMNS, INSUFFICIENT, SIGNALING, count_final_labels
+from qos.monitor.calls import CALL_COLUMNS, SIGNALING, summarize_calls
 from qos.monitor.engine import STATUS_ABNORMAL, SUMMARY_COLUMNS, TIME_FORMAT
 
 logger = logging.getLogger(__name__)
@@ -47,20 +47,19 @@ def _write_recovered(cfg: dict[str, Any], folder: Path, sid: str, window_csv: Pa
     ended = datetime.fromtimestamp(window_csv.stat().st_mtime)
     calls_csv = folder / f"{CALLS_PREFIX}{sid}.csv"
     calls = pd.read_csv(calls_csv) if calls_csv.is_file() else pd.DataFrame(columns=list(CALL_COLUMNS))
-    final = count_final_labels(calls)
-    scored = rows[rows["label"] != SIGNALING]
+    status_col = "status" if "status" in rows else "label"  # log lama memakai `label`
+    scored = rows[rows[status_col] != SIGNALING]
     row = dict.fromkeys(SUMMARY_COLUMNS)
     row.update(
         id_sesi_pemantauan=sid,
         waktu_mulai=str(rows["waktu_jendela"].iloc[0]) if len(rows) else ended.isoformat(timespec="seconds"),
         waktu_selesai=ended.isoformat(timespec="seconds"),
         total_aliran=scored["flow_id"].nunique(),
-        status_keseluruhan=STATUS_ABNORMAL,
+        status_sesi=STATUS_ABNORMAL,
         lokasi_laporan=str(window_csv),
-        jumlah_panggilan=len(calls),
-        panggilan_baik=final["QoS Baik"], panggilan_cukup=final["QoS Cukup"], panggilan_buruk=final["QoS Buruk"],
-        panggilan_anomali=final["Anomali"], panggilan_belum_cukup=final[INSUFFICIENT],
     )
+    if "status_akhir" in calls:  # panggilan format lama (label_akhir) tidak diringkas per klaster
+        row.update(summarize_calls(calls))
     base = f"{SUMMARY_PREFIX}{ended.strftime(TIME_FORMAT)}"
     path, n = folder / f"{base}.csv", 1
     while path.exists():

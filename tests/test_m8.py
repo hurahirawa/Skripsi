@@ -1,6 +1,5 @@
-"""Uji M8: metrik_penyebab, latih ulang (CSV/log), versioning, dan Terapkan Ulang Pelabelan."""
+"""Uji M8: latih ulang dari log dan CSV, sumber log (kolom status/di_luar_klaster), dan versioning hasil latih ulang."""
 import hashlib
-import itertools
 import json
 from pathlib import Path
 
@@ -17,19 +16,10 @@ from qos.model.retrain import (
     load_log_frame,
     retrain,
 )
-from qos.model.versions import (
-    VersionError,
-    activate_version,
-    active_version,
-    label_changes,
-    list_versions,
-    relabel_profile,
-    relabel_version,
-    validate_thresholds,
-)
-from qos.monitor.engine import INSUFFICIENT, WINDOW_COLUMNS, Artifacts, InferenceEngine, load_artifacts
+from qos.model.versions import activate_version, active_version, list_versions
+from qos.monitor.calls import INSUFFICIENT, STATUS_CLUSTERED, STATUS_OUTSIDE
+from qos.monitor.engine import WINDOW_COLUMNS, InferenceEngine, load_artifacts
 from qos.capture.flow_table import WindowFlow
-from qos.profiling.labeling import apply_labels, cause_metrics
 from tests.conftest import synthetic_flows
 
 
@@ -45,7 +35,7 @@ def write_log(cfg, name, rows: pd.DataFrame) -> Path:
     return path
 
 
-def log_rows(n_flows=300, sesi="s1", label="QoS Buruk - Jitter Melebihi Batas", windows=1, mode="cumulative", imputed=False) -> pd.DataFrame:
+def log_rows(n_flows=300, sesi="s1", status=STATUS_CLUSTERED, windows=1, mode="cumulative", imputed=False) -> pd.DataFrame:
     """Baris jendela mirip keluaran MonitoringSession (delay/jitter dalam ms)."""
     flows = synthetic_flows(n=n_flows // 3)
     rows = []
@@ -54,155 +44,27 @@ def log_rows(n_flows=300, sesi="s1", label="QoS Buruk - Jitter Melebihi Batas", 
             rows.append(
                 {"id_sesi": sesi, "flow_id": f"f{i}", "delay_ms": r.iat_mean_us / 1000 * (1 + 0.01 * w),
                  "jitter_ms": r.iat_std_us / 1000, "fwd": r.fwd_packets_count + w, "bwd": r.bwd_packets_count + w,
-                 "label": label, "feature_mode": mode, "diimputasi": imputed}
+                 "status": status, "di_luar_klaster": status == STATUS_OUTSIDE, "feature_mode": mode, "diimputasi": imputed}
             )
     return pd.DataFrame(rows)
-
-
-# ---- metrik_penyebab ----------------------------------------------------------------------------
-def test_cause_metrics_semua_kombinasi():
-    for d, j, l in itertools.product((1, 2, 3), (1, 3), (1, 3)):
-        levels = {"delay": d, "jitter": j, "loss": l}
-        t = max(levels.values())
-        assert cause_metrics(levels) == ([] if t == 1 else [m for m in levels if levels[m] == t])
-        assert cause_metrics(levels, noise=True) == [m for m in levels if levels[m] == 3]
-
-
-def test_apply_labels_format_string_dan_ambang():
-    th = {"delay_good_ms": 150.0, "delay_max_ms": 400.0, "jitter_max_ms": 50.0, "loss_good_pct": 1.0, "loss_max_pct": 3.0}
-    out = apply_labels({"mean_delay_ms": 485.26, "p999_jitter_ms": 4.12, "plr_pct": 22.92}, th)
-    assert out["metrik_penyebab"] == "delay;loss" and out["tingkat"]["klaster"] == 3
-    assert out["label"] == "QoS Buruk - Delay dan Packet Loss Melebihi Batas"
-    noise = apply_labels({"mean_delay_ms": 1183.45, "p999_jitter_ms": 24.09, "plr_pct": 47.11}, th, noise=True)
-    assert noise["metrik_penyebab"] == "delay;loss" and noise["label"].startswith("Anomali")
-    assert apply_labels({"mean_delay_ms": 10, "p999_jitter_ms": 1, "plr_pct": 0}, th)["metrik_penyebab"] == ""
-    assert apply_labels({"mean_delay_ms": 200, "p999_jitter_ms": 1, "plr_pct": 0}, th)["metrik_penyebab"] == "delay"
-
-
-def test_profil_dan_csv_jendela_punya_metrik_penyebab(active_cfg):
-    art = load_artifacts(active_cfg)
-    assert all("metrik_penyebab" in c for c in art.profile["clusters"])
-    eng = InferenceEngine(art, active_cfg)
-    flows = [
-        WindowFlow("ok", 0.0, 5.0, 17, 250, 250, 500, 4.9e6, 10_000.0, 8_000.0),
-        WindowFlow("kurang", 0.0, 5.0, 17, 100, 2, 102, 1e6, 100.0, 10.0),
-    ]
-    raw = eng.predict(flows, "s")
-    assert "metrik_penyebab" in WINDOW_COLUMNS and list(raw.columns) == list(WINDOW_COLUMNS)
-    out = raw.set_index("flow_id")
-    assert out.loc["ok", "metrik_penyebab"] == art.causes[int(out.loc["ok", "cluster_id"])]
-    assert out.loc["kurang", "metrik_penyebab"] == ""  # Data Belum Cukup
-
-
-def test_profil_lama_tanpa_kolom_dihitung_dari_tingkat(active_cfg):
-    art = load_artifacts(active_cfg)
-    old = json.loads(json.dumps(art.profile))
-    expected = art.causes
-    for c in old["clusters"]:
-        c.pop("metrik_penyebab")
-    legacy = Artifacts(art.version, art.model, art.scaler, art.pca, old, art.meta)
-    assert legacy.causes == expected
-
-
-# ---- versioning & relabel -----------------------------------------------------------------------
-def test_validate_thresholds():
-    ok = {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 50, "loss_good_pct": 1, "loss_max_pct": 3}
-    assert validate_thresholds(ok)["loss_max_pct"] == 3.0
-    for bad in ({**ok, "delay_good_ms": 500}, {**ok, "jitter_max_ms": -1}, {**ok, "loss_good_pct": 5}, {k: v for k, v in ok.items() if k != "loss_max_pct"}):
-        with pytest.raises(VersionError):
-            validate_thresholds(bad)
-
-
-def test_relabel_profile_murni_dari_statistik_tersimpan(active_cfg):
-    doc = load_artifacts(active_cfg).profile
-    th = doc["thresholds"]
-    same = relabel_profile(doc, th)
-    assert [c["label"] for c in same["clusters"]] == [c["label"] for c in doc["clusters"]]
-    assert same["evaluation"] == doc["evaluation"]
-    # ambang super longgar → semua klaster non-noise menjadi QoS Baik, noise tetap Anomali (tanpa metrik penyebab)
-    loose = relabel_profile(doc, {"delay_good_ms": 1e9, "delay_max_ms": 1e9, "jitter_max_ms": 1e9, "loss_good_pct": 1e9, "loss_max_pct": 1e9})
-    for c in loose["clusters"]:
-        assert c["label"] == ("Anomali" if c["id_klaster"] == -1 else "QoS Baik")
-        assert c["metrik_penyebab"] == ""
-    # ambang super ketat → semua non-noise Buruk karena semua metrik
-    tight = relabel_profile(doc, {"delay_good_ms": 0, "delay_max_ms": 0, "jitter_max_ms": 0, "loss_good_pct": 0, "loss_max_pct": 0})
-    assert all(c["label"].startswith("QoS Buruk") or c["id_klaster"] == -1 for c in tight["clusters"])
-    # statistik, boxplot, dan jumlah anggota tidak berubah
-    for old, new in zip(doc["clusters"], loose["clusters"]):
-        for k in ("statistik", "boxplot", "statistik_pelabelan", "jumlah_anggota"):
-            assert old[k] == new[k]
-    assert loose["label_map"] == {str(c["id_klaster"]): c["label"] for c in loose["clusters"]}
-
-
-def test_relabel_version_membuat_versi_baru_tanpa_refit(active_cfg):
-    root = Path(active_cfg["paths"]["artifacts_dir"])
-    old_name = active_cfg["_active"]
-    before_old = digest(root / old_name)
-    before_current = (root / "current.txt").read_text("utf-8")
-    new_th = {"delay_good_ms": 150, "delay_max_ms": 400, "jitter_max_ms": 1e9, "loss_good_pct": 1e9, "loss_max_pct": 1e9}
-
-    out = relabel_version(active_cfg, old_name, new_th)
-
-    assert out.name != old_name and out.parent == root
-    assert digest(root / old_name) == before_old  # versi lama tidak berubah
-    assert (root / "current.txt").read_text("utf-8") == before_current  # tidak mengaktifkan
-    new = digest(out)
-    for name in ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "training_sample.csv"):
-        assert new[name] == before_old[name]  # model/scaler/PCA persis sama → tanpa refit
-    doc = json.loads((out / "cluster_profile.json").read_text("utf-8"))
-    assert doc["model_version"] == out.name and doc["thresholds"]["loss_max_pct"] == 1e9
-    meta = json.loads((out / "train_meta.json").read_text("utf-8"))
-    assert meta["relabeled_from"] == old_name and meta["thresholds_sebelum"]["loss_max_pct"] == 3.0
-    old_doc = json.loads((root / old_name / "cluster_profile.json").read_text("utf-8"))
-    assert label_changes(old_doc, doc)["berubah"].any()
-
-
-def test_relabel_version_tolak_versi_tak_lengkap_dan_ambang_tak_valid(active_cfg):
-    with pytest.raises(VersionError):
-        relabel_version(active_cfg, "20000101_000000", active_cfg["thresholds"])
-    with pytest.raises(VersionError):
-        relabel_version(active_cfg, active_cfg["_active"], {**active_cfg["thresholds"], "delay_good_ms": 999})
-    assert len(list_versions(active_cfg)) == 1  # tidak ada versi setengah jadi
-
-
-def test_list_versions_dan_aktivasi(active_cfg):
-    first = active_cfg["_active"]
-    out = relabel_version(active_cfg, first, {**active_cfg["thresholds"], "loss_max_pct": 5.0})
-    v = list_versions(active_cfg).set_index("versi")
-    assert v.loc[first, "aktif"] and not v.loc[out.name, "aktif"]
-    assert v.loc[out.name, "sumber"] == "relabel" and v.loc[out.name, "induk"] == first
-    assert list(list_versions(active_cfg)["versi"]) == sorted([first, out.name], reverse=True)
-
-    with pytest.raises(VersionError, match="monitoring"):
-        activate_version(active_cfg, out.name, monitoring_active=True)
-    assert active_version(active_cfg) == first
-    activate_version(active_cfg, out.name)
-    assert active_version(active_cfg) == out.name
-    assert not (Path(active_cfg["paths"]["artifacts_dir"]) / "current.tmp").exists()  # tulis atomik
-    with pytest.raises(VersionError, match="tidak ditemukan"):
-        activate_version(active_cfg, "tidak_ada")
-    (Path(active_cfg["paths"]["artifacts_dir"]) / "rusak").mkdir()
-    with pytest.raises(VersionError, match="tidak lengkap"):
-        activate_version(active_cfg, "rusak")
-    assert "rusak" not in list(list_versions(active_cfg)["versi"])
 
 
 # ---- sumber log ---------------------------------------------------------------------------------
 def test_load_log_frame_pengecualian_dan_konversi(iso_cfg):
     iso_cfg["retrain"]["log_source"].update({"min_rows": 10})
     good = log_rows(60)
-    insufficient = good.head(20).assign(label=INSUFFICIENT, flow_id=lambda d: "x" + d["flow_id"])
-    anomaly = good.head(15).assign(label="Anomali - Delay Ekstrem", flow_id=lambda d: "y" + d["flow_id"])
-    write_log(iso_cfg, "a", pd.concat([good, insufficient, anomaly], ignore_index=True))
+    insufficient = good.head(20).assign(status=INSUFFICIENT, di_luar_klaster=pd.NA, flow_id=lambda d: "x" + d["flow_id"])
+    outside = good.head(15).assign(status=STATUS_OUTSIDE, di_luar_klaster=True, flow_id=lambda d: "y" + d["flow_id"])
+    write_log(iso_cfg, "a", pd.concat([good, insufficient, outside], ignore_index=True))
     frame, counts = load_log_frame(iso_cfg)
     assert counts["baris_log"] == 95 and counts["setelah_buang_data_belum_cukup"] == 75
-    assert counts["setelah_buang_anomali"] == 60 and counts["setelah_filter_sesi"] == 60
+    assert counts["setelah_buang_di_luar_klaster"] == 60 and counts["setelah_filter_sesi"] == 60
     assert list(frame.columns) == ["iat_mean_us", "iat_std_us", "fwd_packets_count", "bwd_packets_count"]
     assert frame["iat_mean_us"].iloc[0] == pytest.approx(good["delay_ms"].iloc[0] * 1000)
 
-    iso_cfg["retrain"]["log_source"]["exclude_anomaly"] = False
+    iso_cfg["retrain"]["log_source"]["exclude_outside_cluster"] = False
     _, counts = load_log_frame(iso_cfg)
-    assert counts["setelah_buang_anomali"] == 75  # opsi config menentukan
+    assert counts["setelah_buang_di_luar_klaster"] == 75  # opsi config menentukan
 
 
 def test_load_log_frame_per_flow_last_vs_all(iso_cfg):
@@ -254,10 +116,14 @@ def test_log_tidak_ada_dan_exclude_insufficient_wajib(iso_cfg):
 # ---- latih ulang --------------------------------------------------------------------------------
 def test_apply_overrides_tidak_mengubah_config_asli(iso_cfg):
     out = apply_overrides(iso_cfg, {"min_cluster_size": 9, "min_samples": 3, "grid_enabled": False,
-                                    "thresholds": {"loss_max_pct": 1.0}})
+                                    "thresholds": {"loss_max_pct": 1.0}, "selection": {"min_ari_mean": 0.5},
+                                    "limit_percentile": 90, "limit_rule": "global"})
     assert (out["hdbscan"]["min_cluster_size"], out["hdbscan"]["min_samples"]) == (9, 3)
     assert out["hdbscan"]["grid_search"]["enabled"] is False and out["thresholds"]["loss_max_pct"] == 1.0
-    assert iso_cfg["thresholds"]["loss_max_pct"] == 3.0 and iso_cfg["hdbscan"]["min_cluster_size"] == 5
+    assert out["hdbscan"]["selection"]["min_ari_mean"] == 0.5 and out["hdbscan"]["selection"]["max_noise_ratio"] == 0.20
+    assert (out["assignment"]["limit_percentile"], out["assignment"]["limit_rule"]) == (90, "global")
+    assert iso_cfg["thresholds"]["loss_max_pct"] == 3.0 and iso_cfg["hdbscan"]["min_cluster_size"] == 3
+    assert iso_cfg["hdbscan"]["selection"]["min_ari_mean"] == 0.90 and iso_cfg["assignment"]["limit_rule"] == "max_cluster_global"
 
 
 def test_retrain_log_tidak_menimpa_dan_tidak_mengaktifkan(active_cfg):
@@ -299,16 +165,8 @@ def test_retrain_parameter_dari_ui_dipakai(active_cfg):
     active_cfg["retrain"]["log_source"]["min_rows"] = 100
     res = retrain(active_cfg, "log", params={"grid_enabled": False, "min_cluster_size": 7, "min_samples": 3})
     assert res["params"]["min_cluster_size"] == 7 and res["params"]["grid_search"] is False
-    assert active_cfg["hdbscan"]["min_cluster_size"] == 5  # config asli utuh
+    assert active_cfg["hdbscan"]["min_cluster_size"] == 3  # config asli utuh
     assert active_version(active_cfg) == active_cfg["_active"]
-
-
-def test_label_changes_tabel():
-    old = {"clusters": [{"id_klaster": 0, "label": "A"}, {"id_klaster": 1, "label": "B"}]}
-    new = {"clusters": [{"id_klaster": 0, "label": "A"}, {"id_klaster": 1, "label": "C"}]}
-    t = label_changes(old, new)
-    assert t["berubah"].tolist() == [False, True] and t.loc[1, "label_baru"] == "C"
-    assert np.all(t.columns == ["klaster", "label_lama", "label_baru", "berubah"])
 
 
 # ---- kolom feature_mode dan diimputasi (M8b) ----------------------------------------------------
@@ -384,3 +242,30 @@ def test_csv_jendela_nyata_dari_sesi_bisa_dibaca_loader(active_cfg, tmp_path):
     active_cfg["retrain"]["log_source"]["min_rows"] = 1
     frame, counts = load_log_frame(active_cfg, [s.window_csv])
     assert counts["dikecualikan_mode_tidak_diketahui"] == 0 and len(frame) >= 1
+
+
+def test_log_format_lama_dengan_kolom_label_tetap_terbaca(iso_cfg):
+    """Log sebelum klasterisasi murni: `label` memuat Data Belum Cukup / Sinyal SIP; tanpa di_luar_klaster tidak ada yang dibuang."""
+    iso_cfg["retrain"]["log_source"]["min_rows"] = 10
+    rows = log_rows(60).drop(columns=["status", "di_luar_klaster"]).assign(label="QoS Baik")
+    junk = rows.head(10).assign(label=INSUFFICIENT, flow_id=lambda d: "x" + d["flow_id"])
+    write_log(iso_cfg, "lama", pd.concat([rows, junk], ignore_index=True))
+    frame, counts = load_log_frame(iso_cfg)
+    assert len(frame) == 60 and counts["setelah_buang_data_belum_cukup"] == 60
+
+
+def test_log_tanpa_kolom_status_maupun_label_ditolak(iso_cfg):
+    write_log(iso_cfg, "x", log_rows(30).drop(columns=["status"]))
+    with pytest.raises(RetrainError, match="status"):
+        load_log_frame(iso_cfg)
+
+
+def test_hasil_latih_ulang_log_bisa_diaktifkan_dan_dipakai_engine(active_cfg):
+    write_log(active_cfg, "a", log_rows(300))
+    active_cfg["retrain"]["log_source"]["min_rows"] = 100
+    res = retrain(active_cfg, "log")
+    activate_version(active_cfg, res["version"])
+    art = load_artifacts(active_cfg)
+    assert art.version == res["version"] and art.cluster_ids == list(range(1, len(art.cluster_ids) + 1))
+    out = InferenceEngine(art, active_cfg).predict([WindowFlow("a", 0.0, 5.0, 17, 250, 250, 500, 4.9e6, 10_000.0, 8_000.0)], "s")
+    assert list(out.columns) == list(WINDOW_COLUMNS) and out["klaster_terdekat"].iloc[0] in art.cluster_ids

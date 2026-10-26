@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-import hdbscan
 import joblib
 import numpy as np
 import pandas as pd
@@ -24,15 +23,18 @@ from qos.capture.flow_table import FlowEnd, WindowAggregator, WindowFlow, flow_p
 from qos.config import resolve_path
 from qos.features.extract import derive_metrics
 from qos.features.preprocess import build_features, impute_median
-from qos.monitor.calls import CALL_COLUMNS, INSUFFICIENT, SIGNALING, CallTracker, count_final_labels
-from qos.profiling.labeling import (
-    ACTIONS,
-    CATEGORY_ANOMALI,
-    CATEGORY_BURUK,
-    CAUSE_SEPARATOR,
-    METRIC_NAMES,
-    NOISE_ID,
-    cause_metrics,
+from qos.model.assignment import NOISE_ID, assign, format_distances, parse_distances
+from qos.model.versions import LEGACY_MESSAGE, REQUIRED_FILES, is_legacy
+from qos.monitor.calls import (
+    CALL_COLUMNS,
+    INSUFFICIENT,
+    OUTSIDE_KEY,
+    SIGNALING,
+    STATUS_CLUSTERED,
+    STATUS_OUTSIDE,
+    CallTracker,
+    cluster_key,
+    summarize_calls,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,21 +42,20 @@ logger = logging.getLogger(__name__)
 CURRENT_FILE = "current.txt"
 WINDOW_COLUMNS: tuple[str, ...] = (
     "waktu_jendela", "id_sesi", "flow_id", "delay_ms", "jitter_ms", "fwd", "bwd", "fai_pct",
-    "cluster_id", "membership_prob", "label", "kategori_tindakan", "metrik_penyebab", "pc1", "pc2",
-    "feature_mode", "diimputasi",
+    "status", "klaster_terdekat", "jarak_terdekat", "di_luar_klaster", "jarak_ke_klaster", "klaster_kmeans5",
+    "pc1", "pc2", "feature_mode", "diimputasi",
 )
 SUMMARY_COLUMNS: tuple[str, ...] = (
     "id_sesi_pemantauan", "waktu_mulai", "waktu_selesai", "total_aliran", "jumlah_klaster",
-    "skor_silhouette", "skor_chi", "noise_ratio", "status_keseluruhan", "lokasi_laporan",
-    "jumlah_panggilan", "panggilan_baik", "panggilan_cukup", "panggilan_buruk", "panggilan_anomali",
-    "panggilan_belum_cukup",
+    "skor_silhouette", "skor_dbcv", "skor_chi", "noise_ratio", "status_sesi", "lokasi_laporan",
+    "jumlah_panggilan", "panggilan_per_klaster", "panggilan_di_luar_klaster", "persen_di_luar_klaster",
+    "klaster_mayoritas", "panggilan_belum_cukup",
 )
-STATUS_CRITICAL, STATUS_EMPTY = "Kritis", "Tidak ada data"
+STATUS_DONE, STATUS_EMPTY = "Selesai", "Tidak ada data"
 STATUS_ABNORMAL = "Dihentikan tidak normal"
 TIME_FORMAT = "%Y%m%d_%H%M%S"
 US_PER_MS = 1000.0
 SESSION_SUFFIX_LEN = 6
-CARD_KEYS: tuple[str, ...] = ("QoS Baik", "QoS Cukup", "QoS Buruk", "Anomali")
 
 
 class ModelNotFoundError(RuntimeError):
@@ -71,29 +72,32 @@ class Artifacts:
     pca: Any
     profile: dict[str, Any]
     meta: dict[str, Any]
+    assignment: dict[str, Any]
 
     @property
-    def labels(self) -> dict[int, str]:
-        """cluster_id → label (lookup, tanpa hitung ulang)."""
-        return {int(k): v for k, v in self.profile["label_map"].items()}
+    def centroids(self) -> dict[int, np.ndarray]:
+        """Centroid HDBSCAN (ruang ter-skala) per nomor klaster 1..k."""
+        return {int(k): np.asarray(v, dtype=float) for k, v in self.assignment["hdbscan"]["centroid"].items()}
 
     @property
-    def causes(self) -> dict[int, str]:
-        """cluster_id → metrik_penyebab ("delay;loss"); untuk profil lama dihitung dari `tingkat`."""
-        out = {}
-        for c in self.profile["clusters"]:
-            cid = int(c["id_klaster"])
-            if "metrik_penyebab" in c:
-                out[cid] = c["metrik_penyebab"]
-            else:
-                levels = {m: c["tingkat"][m] for m in METRIC_NAMES}
-                out[cid] = CAUSE_SEPARATOR.join(cause_metrics(levels, noise=cid == NOISE_ID))
-        return out
+    def limits(self) -> dict[int, float]:
+        """Batas jarak "di luar klaster" per klaster (aturan tersimpan di assignment.json)."""
+        return {int(k): float(v) for k, v in self.assignment["hdbscan"]["batas"].items()}
 
     @property
-    def actions(self) -> dict[int, str]:
-        """cluster_id → kategori tindakan."""
-        return {int(c["id_klaster"]): c["kategori_tindakan"] for c in self.profile["clusters"]}
+    def kmeans_centroids(self) -> dict[int, np.ndarray]:
+        """Centroid K-Means pembanding (k = jumlah klaster HDBSCAN)."""
+        return {int(k): np.asarray(v, dtype=float) for k, v in self.assignment["kmeans_n"]["centroid"].items()}
+
+    @property
+    def cluster_ids(self) -> list[int]:
+        """Nomor klaster HDBSCAN (1..k)."""
+        return sorted(self.centroids)
+
+    @property
+    def descriptions(self) -> dict[int, str]:
+        """Nomor klaster → deskripsi ringkas posisi terhadap ambang ITU (deskriptif, bukan label)."""
+        return {int(c["id_klaster"]): c["deskripsi"]["ringkas"] for c in self.profile["clusters"] if int(c["id_klaster"]) != NOISE_ID}
 
 
 def load_artifacts(cfg: dict[str, Any], version: str | None = None) -> Artifacts:
@@ -105,8 +109,9 @@ def load_artifacts(cfg: dict[str, Any], version: str | None = None) -> Artifacts
             raise ModelNotFoundError(f"Tidak ada model aktif ({current} tidak ada). Latih model: python scripts/train.py")
         version = current.read_text("utf-8").strip()
     folder = root / version
-    needed = ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "cluster_profile.json", "train_meta.json")
-    missing = [n for n in needed if not (folder / n).is_file()]
+    if folder.is_dir() and is_legacy(folder):
+        raise ModelNotFoundError(LEGACY_MESSAGE.format(v=version))
+    missing = [n for n in REQUIRED_FILES if not (folder / n).is_file()]
     if missing:
         raise ModelNotFoundError(f"Artefak versi {version} tidak lengkap, kurang: {missing}")
     return Artifacts(
@@ -116,20 +121,21 @@ def load_artifacts(cfg: dict[str, Any], version: str | None = None) -> Artifacts
         pca=joblib.load(folder / "pca.joblib"),
         profile=json.loads((folder / "cluster_profile.json").read_text("utf-8")),
         meta=json.loads((folder / "train_meta.json").read_text("utf-8")),
+        assignment=json.loads((folder / "assignment.json").read_text("utf-8")),
     )
 
 
 class InferenceEngine:
-    """Fitur jendela → scaler.transform → approximate_predict → lookup label (scaler TIDAK di-fit ulang)."""
+    """Fitur jendela → scaler.transform → jarak Euclidean ke centroid → klaster terdekat (scaler TIDAK di-fit ulang)."""
 
     def __init__(self, art: Artifacts, cfg: dict[str, Any]) -> None:
         self.art, self.cfg = art, cfg
-        self.labels, self.actions, self.causes = art.labels, art.actions, art.causes
+        self.centroids, self.limits, self.km_centroids = art.centroids, art.limits, art.kmeans_centroids
         self.n_insufficient = 0  # baris "Data Belum Cukup"
         self.signaling_ports = {int(p) for p in self.cfg["monitoring"].get("signaling_ports") or []}
 
     def predict(self, flows: list[WindowFlow], session_id: str) -> pd.DataFrame:
-        """Prediksi klaster dan label tiap WindowFlow; kolom sesuai WINDOW_COLUMNS."""
+        """Klaster terdekat tiap WindowFlow; kolom sesuai WINDOW_COLUMNS."""
         if not flows:
             return pd.DataFrame(columns=list(WINDOW_COLUMNS))
         feat, meta = self.cfg["features"], self.art.meta
@@ -145,7 +151,7 @@ class InferenceEngine:
             fai = np.where(fwd > 0, (fwd - bwd) / fwd * 100, np.nan)
         if meta["fai_clip_negative"]:
             fai = np.where(np.isnan(fai), fai, np.maximum(fai, 0))
-        # baris "Data Belum Cukup": nilai mentah dicatat, tanpa prediksi (cluster/prob/PC kosong)
+        # baris "Data Belum Cukup": nilai mentah dicatat, tanpa penugasan (klaster/jarak/PC kosong)
         out = pd.DataFrame(
             {
                 "waktu_jendela": [datetime.fromtimestamp(f.window_start).isoformat(timespec="seconds") for f in flows],
@@ -156,22 +162,23 @@ class InferenceEngine:
                 "fwd": fwd.astype(int),
                 "bwd": bwd.astype(int),
                 "fai_pct": fai,
-                "cluster_id": pd.array([pd.NA] * len(flows), dtype="Int64"),
-                "membership_prob": np.nan,
-                "label": INSUFFICIENT,
-                "kategori_tindakan": "-",
-                "metrik_penyebab": "",
+                "status": INSUFFICIENT,
+                "klaster_terdekat": pd.array([pd.NA] * len(flows), dtype="Int64"),
+                "jarak_terdekat": np.nan,
+                "di_luar_klaster": pd.array([pd.NA] * len(flows), dtype="boolean"),
+                "jarak_ke_klaster": "",
+                "klaster_kmeans5": pd.array([pd.NA] * len(flows), dtype="Int64"),
                 "pc1": np.nan,
                 "pc2": np.nan,
                 "feature_mode": self.cfg["monitoring"]["feature_mode"],
-                "diimputasi": False,  # baris tanpa prediksi tidak diimputasi
+                "diimputasi": False,  # baris tanpa penugasan tidak diimputasi
             }
         )
-        out.loc[signaling, "label"] = SIGNALING  # flow sinyal: nilai mentah dicatat, tanpa prediksi
+        out.loc[signaling, "status"] = SIGNALING  # flow sinyal: nilai mentah dicatat, tanpa penugasan
         if not enough.any():
             return out[list(WINDOW_COLUMNS)]
 
-        # MON-5: nilai kosong → median artefak latih (hanya untuk baris yang diprediksi)
+        # MON-5: nilai kosong → median artefak latih (hanya untuk baris yang ditugaskan)
         raw = pd.DataFrame(
             {
                 feat["delay_column"]: [f.iat_mean_us for f, ok in zip(flows, enough) if ok],
@@ -184,65 +191,61 @@ class InferenceEngine:
         imputed = raw[[feat["delay_column"], feat["jitter_column"]]].isna().any(axis=1).to_numpy()
         raw[base] = impute_median(raw[base], meta["median_imputasi"])
         d = derive_metrics(raw, feat["delay_column"], feat["jitter_column"], meta["fai_clip_negative"])
-        X = self.art.scaler.transform(build_features(d, meta["cluster_columns"], meta["log_transform"]))
-        ids, prob = hdbscan.approximate_predict(self.art.model, np.asarray(X, dtype=float))
+        X = np.asarray(self.art.scaler.transform(build_features(d, meta["cluster_columns"], meta["log_transform"])), dtype=float)
+        a = assign(X, self.centroids, self.limits)
+        km = assign(X, self.km_centroids)
         pcs = self.art.pca.transform(X)
-        ids = np.asarray(ids, dtype=int)
 
         idx = out.index[enough]
         out.loc[idx, "delay_ms"] = d["delay_ms"].to_numpy()  # nilai setelah imputasi median
         out.loc[idx, "jitter_ms"] = d["jitter_ms"].to_numpy()
         out.loc[idx, "fai_pct"] = d["fai_pct"].to_numpy()
-        out.loc[idx, "cluster_id"] = pd.array(ids, dtype="Int64")
-        out.loc[idx, "membership_prob"] = np.asarray(prob, dtype=float)
-        out.loc[idx, "label"] = [self.labels.get(int(i), self.labels.get(NOISE_ID, CATEGORY_ANOMALI)) for i in ids]
-        out.loc[idx, "kategori_tindakan"] = [self.actions.get(int(i), ACTIONS[CATEGORY_ANOMALI]) for i in ids]
-        out.loc[idx, "metrik_penyebab"] = [self.causes.get(int(i), self.causes.get(NOISE_ID, "")) for i in ids]
+        out.loc[idx, "status"] = np.where(a.outside, STATUS_OUTSIDE, STATUS_CLUSTERED)
+        out.loc[idx, "klaster_terdekat"] = pd.array(a.nearest, dtype="Int64")
+        out.loc[idx, "jarak_terdekat"] = a.nearest_dist
+        out.loc[idx, "di_luar_klaster"] = pd.array(a.outside, dtype="boolean")
+        out.loc[idx, "jarak_ke_klaster"] = [format_distances(a.ids, row) for row in a.dist]
+        out.loc[idx, "klaster_kmeans5"] = pd.array(km.nearest, dtype="Int64")
         out.loc[idx, "pc1"] = pcs[:, 0]
         out.loc[idx, "pc2"] = pcs[:, 1]
         out.loc[idx, "diimputasi"] = imputed
         return out[list(WINDOW_COLUMNS)]
 
 
-def card_category(label: str) -> str:
-    """Kategori kartu dari label: QoS Baik / Cukup / Buruk / Anomali, atau "Data Belum Cukup"."""
-    if label in (INSUFFICIENT, SIGNALING):
-        return label
-    for key in CARD_KEYS:
-        if label.startswith(key):
-            return key
-    return CATEGORY_ANOMALI
+def state_key(status: str, cluster: Any = None) -> str:
+    """Kunci kartu/sparkline: "Klaster N", "Di luar klaster", "Data Belum Cukup", atau "Sinyal SIP"."""
+    if status == STATUS_CLUSTERED:
+        return cluster_key(cluster)
+    if status == STATUS_OUTSIDE:
+        return OUTSIDE_KEY
+    return status
 
 
-def overall_status(last_labels: dict[str, str], kritis_ratio: float) -> str:
-    """"Kritis" jika proporsi flow (QoS Buruk + Anomali) > kritis_ratio; selain itu label mayoritas."""
-    if not last_labels:
-        return STATUS_EMPTY
-    scored = {k: v for k, v in last_labels.items() if v != INSUFFICIENT}  # "Data Belum Cukup" tidak dihitung
-    if not scored:
-        return INSUFFICIENT
-    bad = sum(card_category(v) in (CATEGORY_BURUK, CATEGORY_ANOMALI) for v in scored.values())
-    if bad / len(scored) > kritis_ratio:
-        return STATUS_CRITICAL
-    return Counter(scored.values()).most_common(1)[0][0]
-
-
-SEVERITY: dict[str, int] = {INSUFFICIENT: 0, "QoS Baik": 1, "QoS Cukup": 2, "QoS Buruk": 3, "Anomali": 4}
 STATUS_WAITING = "Menunggu data"
 
 
-def connection_status(active: list[dict[str, Any]]) -> tuple[str, str]:
-    """(label, kategori) status koneksi saat ini: label terparah di antara panggilan aktif pada jendela terbaru.
+def connection_status(active: list[dict[str, Any]]) -> dict[str, Any]:
+    """Status koneksi saat ini dari panggilan aktif pada jendela terbaru (tanpa makna baik/buruk).
 
-    Tanpa prediksi: "Data Belum Cukup" bila ada panggilan aktif yang belum cukup data, selain itu "Menunggu data".
+    Kelompok terbanyak menentukan banner: "Klaster N" (jarak = median jarak panggilan di kelompok itu) atau
+    "Di luar klaster" (terdekat = klaster terdekat yang paling sering). Seri → klaster bernomor kecil; di luar klaster
+    menang hanya bila lebih banyak. Tanpa penugasan: "Data Belum Cukup" bila ada panggilan aktif, selain itu "Menunggu data".
     """
-    scored = [c for c in active if c["kategori"] != INSUFFICIENT]
-    if scored:
-        worst = max(scored, key=lambda c: SEVERITY.get(c["kategori"], -1))
-        return worst["label"], worst["kategori"]
-    if active:
-        return INSUFFICIENT, INSUFFICIENT
-    return STATUS_WAITING, STATUS_WAITING
+    scored = [c for c in active if c["status"] in (STATUS_CLUSTERED, STATUS_OUTSIDE)]
+    if not scored:
+        key = INSUFFICIENT if active else STATUS_WAITING
+        return {"teks": key, "kunci": key, "klaster": None, "jarak": None, "di_luar": False, "n_aktif": len(active), "n_kelompok": 0}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for c in scored:
+        groups.setdefault(state_key(c["status"], c["klaster"]), []).append(c)
+    order = sorted((k for k in groups if k != OUTSIDE_KEY), key=lambda k: int(k.split()[-1])) + ([OUTSIDE_KEY] if OUTSIDE_KEY in groups else [])
+    top = max(order, key=lambda k: len(groups[k]))  # max mengambil yang pertama bila seri: klaster bernomor kecil, di luar klaster terakhir
+    members = groups[top]
+    dist = float(np.median([m["jarak"] for m in members]))
+    nearest = Counter(int(m["klaster"]) for m in members).most_common(1)[0][0] if top == OUTSIDE_KEY else int(members[0]["klaster"])
+    text = f"{OUTSIDE_KEY} (terdekat: {cluster_key(nearest)})" if top == OUTSIDE_KEY else f"paling dekat ke {cluster_key(nearest)}"
+    return {"teks": text, "kunci": top, "klaster": nearest, "jarak": dist, "di_luar": top == OUTSIDE_KEY,
+            "n_aktif": len(active), "n_kelompok": len(members)}
 
 
 def safe_name(text: str) -> str:
@@ -280,12 +283,12 @@ class MonitoringSession:
         self.n_windows_rows = 0
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
-        self._last_label: dict[str, str] = {}
+        self._last_state: dict[str, dict[str, Any]] = {}  # flow_id → status/klaster terakhir
         self._signaling: set[str] = set()  # flow sinyal: tidak masuk kartu, status, panggilan
         self.n_packets = 0  # status capture: paket yang masuk ke aggregator
         self.last_packet_at: float | None = None  # jam dinding paket terakhir
         self.active_flows = 0
-        self._active: dict[str, dict[str, Any]] = {}  # panggilan aktif: nilai terbaru + riwayat kategori per jendela
+        self._active: dict[str, dict[str, Any]] = {}  # panggilan aktif: nilai terbaru + riwayat per jendela
         atexit.register(self._on_exit)  # aplikasi ditutup tanpa Stop → ringkasan "Dihentikan tidak normal"
         self._finished = False
 
@@ -337,17 +340,18 @@ class MonitoringSession:
 
     # ---- status live untuk dashboard ----
     def active_calls(self) -> list[dict[str, Any]]:
-        """Panggilan aktif (bukan Sinyal SIP), terparah dulu: nilai jendela terbaru dan riwayat kategori per jendela."""
+        """Panggilan aktif (bukan Sinyal SIP): klaster terdekat, jarak, jarak ke semua centroid, dan riwayat per jendela."""
         with self._lock:
             out = [
                 {
-                    "flow_id": fid, "durasi_s": a["last_end"] - a["first_start"], "label": a["label"],
-                    "kategori": card_category(a["label"]), "delay_ms": a["delay_ms"], "jitter_ms": a["jitter_ms"],
-                    "fai_pct": a["fai_pct"], "riwayat": list(a["history"]),
+                    "flow_id": fid, "durasi_s": a["last_end"] - a["first_start"], "status": a["status"],
+                    "kunci": state_key(a["status"], a["klaster"]), "klaster": a["klaster"], "jarak": a["jarak"],
+                    "di_luar": a["status"] == STATUS_OUTSIDE, "jarak_ke_klaster": a["jarak_ke_klaster"],
+                    "delay_ms": a["delay_ms"], "jitter_ms": a["jitter_ms"], "fai_pct": a["fai_pct"], "riwayat": list(a["history"]),
                 }
                 for fid, a in self._active.items()
             ]
-        return sorted(out, key=lambda c: SEVERITY.get(c["kategori"], -1), reverse=True)
+        return sorted(out, key=lambda c: c["durasi_s"], reverse=True)
 
     def capture_stats(self) -> dict[str, Any]:
         """Status capture: paket tertangkap, flow aktif, dan umur paket terakhir (detik; None jika belum ada)."""
@@ -362,14 +366,15 @@ class MonitoringSession:
 
     # ---- data untuk UI ----
     def card_counts(self) -> dict[str, int]:
-        """Hitung flow unik berdasarkan label terakhir: total, 4 kategori, dan "Data Belum Cukup"."""
+        """Jumlah flow unik menurut status terakhir: total, tiap klaster, Di luar klaster, Data Belum Cukup, Sinyal SIP."""
         with self._lock:
-            labels = list(self._last_label.values())
+            states = list(self._last_state.values())
             n_signaling = len(self._signaling)
-        counts = Counter(card_category(v) for v in labels)
+        counts = Counter(state_key(s["status"], s["klaster"]) for s in states)
         return {
-            "Total Aliran Trafik": len(labels),
-            **{k: counts.get(k, 0) for k in CARD_KEYS},
+            "Total Aliran Trafik": len(states),
+            **{cluster_key(c): counts.get(cluster_key(c), 0) for c in self.engine.art.cluster_ids},
+            OUTSIDE_KEY: counts.get(OUTSIDE_KEY, 0),
             INSUFFICIENT: counts.get(INSUFFICIENT, 0),
             SIGNALING: n_signaling,
         }
@@ -432,10 +437,11 @@ class MonitoringSession:
             return
         df.to_csv(self.window_csv, mode="a", header=not self.window_csv.exists(), index=False)  # MON-7
         with self._lock:
-            is_sig = df["label"] == SIGNALING
+            is_sig = df["status"] == SIGNALING
             self._signaling.update(df.loc[is_sig, "flow_id"])
             scored = df[~is_sig]
-            self._last_label.update(dict(zip(scored["flow_id"], scored["label"])))
+            for r in scored.to_dict("records"):
+                self._last_state[r["flow_id"]] = {"status": r["status"], "klaster": r["klaster_terdekat"]}
             self.n_windows_rows += len(df)
             self._tracker.update(scored)
             self._update_active(flows, df)
@@ -444,14 +450,17 @@ class MonitoringSession:
     def _update_active(self, flows: list[WindowFlow], df: pd.DataFrame) -> None:
         spark = self.cfg["monitoring"]["sparkline_windows"]
         for f, row in zip(flows, df.to_dict("records")):
-            if row["label"] == SIGNALING:
+            if row["status"] == SIGNALING:
                 continue
             a = self._active.setdefault(
                 f.flow_id, {"first_start": f.window_start, "history": deque(maxlen=spark)}
             )
-            a.update(last_end=f.window_end, label=row["label"], delay_ms=row["delay_ms"],
+            cluster = None if pd.isna(row["klaster_terdekat"]) else int(row["klaster_terdekat"])
+            a.update(last_end=f.window_end, status=row["status"], klaster=cluster,
+                     jarak=None if pd.isna(row["jarak_terdekat"]) else float(row["jarak_terdekat"]),
+                     jarak_ke_klaster=parse_distances(row["jarak_ke_klaster"]), delay_ms=row["delay_ms"],
                      jitter_ms=row["jitter_ms"], fai_pct=row["fai_pct"])
-            a["history"].append(card_category(row["label"]))
+            a["history"].append(state_key(row["status"], cluster))
 
     def _emit_calls(self, ends: list[FlowEnd]) -> None:
         if not ends:
@@ -470,10 +479,8 @@ class MonitoringSession:
         ended = datetime.now()
         ev = self.engine.art.profile["evaluation"]
         calls = pd.read_csv(self.calls_csv) if self.calls_csv.is_file() else pd.DataFrame(columns=list(CALL_COLUMNS))
-        final = count_final_labels(calls)
         with self._lock:
-            status = status_override or overall_status(self._last_label, self.cfg["monitoring"]["kritis_ratio"])
-            total = len(self._last_label)
+            total = len(self._last_state)
         row = {
             "id_sesi_pemantauan": self.session_id,
             "waktu_mulai": self.started_at.isoformat(timespec="seconds"),
@@ -481,16 +488,12 @@ class MonitoringSession:
             "total_aliran": total,
             "jumlah_klaster": ev["n_clusters"],
             "skor_silhouette": ev["silhouette"],
+            "skor_dbcv": ev.get("dbcv"),
             "skor_chi": ev["chi"],
             "noise_ratio": ev["noise_ratio"],
-            "status_keseluruhan": status,
+            "status_sesi": status_override or (STATUS_DONE if total else STATUS_EMPTY),
             "lokasi_laporan": str(self.window_csv),
-            "jumlah_panggilan": len(calls),
-            "panggilan_baik": final["QoS Baik"],
-            "panggilan_cukup": final["QoS Cukup"],
-            "panggilan_buruk": final["QoS Buruk"],
-            "panggilan_anomali": final["Anomali"],
-            "panggilan_belum_cukup": final[INSUFFICIENT],
+            **summarize_calls(calls),
         }
         path = self.history_dir / f"riwayat_pemantauan_{ended.strftime(TIME_FORMAT)}.csv"
         n = 1

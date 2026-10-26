@@ -27,7 +27,7 @@ def test_config_kunci_filter_sesi_final():
     assert cfg["data"]["min_session"] == {"fwd": 5, "bwd": 5}
     assert cfg["data"]["exclude_traffic_types"] == ["Tor"]
     assert cfg["data"]["voip_filter"]["min_flows_warning"] == 200
-    assert cfg["hdbscan"]["grid_search"]["min_cluster_size"] == [5, 10, 15, 20, 25]
+    assert cfg["hdbscan"]["grid_search"]["min_cluster_size"] == [3, 5, 8, 10, 15, 20, 30, 50]
     assert cfg["features"]["fai_clip_negative"] is True
 
 

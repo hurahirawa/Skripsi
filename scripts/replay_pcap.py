@@ -63,7 +63,7 @@ def main() -> None:
         print(f"Sesi: {session.session_id} · baris jendela: {len(rows)} · flow: {rows['flow_id'].nunique() if len(rows) else 0}")
         print(f"Kartu: {session.card_counts()}")
         if len(rows):
-            print(rows.groupby(["cluster_id", "label"]).size().rename("jumlah_jendela").to_string())
+            print(rows.groupby(["klaster_terdekat", "status"], dropna=False).size().rename("jumlah_jendela").to_string())
         print(f"CSV jendela: {session.window_csv}\nRingkasan: {session.summary_path}")
         print(pd.read_csv(session.summary_path).T.to_string(header=False))
 
