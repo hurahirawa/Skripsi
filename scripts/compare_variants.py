@@ -1,7 +1,7 @@
 """Perbandingan varian fitur klaster (config experiments.feature_variants); tidak mengubah current.txt.
 
 Tiap varian dilatih penuh (grid search) dan artefaknya disimpan dengan activate=False.
-Profil dan label tetap dihitung dari metrik satuan asli (ms, %), bukan dari nilai log.
+Profil tetap dihitung dari metrik satuan asli (ms, %), bukan dari nilai log.
 
 Pemakaian: python scripts/compare_variants.py --config config/default_config.yaml [--data path] [--out folder]
 """
@@ -40,10 +40,10 @@ def profile_table(profile: list[dict]) -> pd.DataFrame:
     """Tabel profil per klaster dari statistik satuan asli."""
     rows = []
     for c in profile:
-        s = c["statistik_pelabelan"]
+        s = c["statistik_tambahan"]
         rows.append(
             {"klaster": c["id_klaster"], "n": c["jumlah_anggota"], "mean delay (ms)": s["mean_delay_ms"],
-             "P99,9 jitter (ms)": s["p999_jitter_ms"], "PLR (%)": s["plr_pct"], "label": c["label"]}
+             "P99,9 jitter (ms)": s["p999_jitter_ms"], "PLR (%)": s["plr_pct"], "deskripsi ITU": c["deskripsi"]["ringkas"]}
         )
     return pd.DataFrame(rows)
 
@@ -86,7 +86,7 @@ def main() -> None:
         "# Perbandingan varian fitur klaster (M3)",
         "",
         f"Flow latih: {len(flows):,} · ambang ITU tidak diubah: {th}",
-        "Profil dan label dari metrik satuan asli (ms, %); varian hanya mengubah ruang fitur HDBSCAN.",
+        "Profil dari metrik satuan asli (ms, %); varian hanya mengubah ruang fitur HDBSCAN.",
         "",
     ]
     diag = None
@@ -97,7 +97,7 @@ def main() -> None:
         out = save_artifacts(result, vcfg, activate=False)
         ev, params = result["evaluation"], result["params"]
         grid = result["grid"]
-        top = grid[grid["valid"]].sort_values(["silhouette", "chi"], ascending=False, kind="stable").head(exp["top_n"])
+        top = grid[grid["valid"]].sort_values(["dbcv", "silhouette"], ascending=False, kind="stable").head(exp["top_n"])
         diag = fai_diagnostics(result["frame"])
         lines += [
             f"## Varian {name}",
@@ -107,7 +107,7 @@ def main() -> None:
             "",
             f"### {exp['top_n']} kandidat valid teratas",
             "",
-            md(top[["min_cluster_size", "min_samples", "silhouette", "chi", "noise_ratio", "n_clusters"]]),
+            md(top[["min_cluster_size", "min_samples", "dbcv", "silhouette", "ari_mean", "noise_ratio", "n_clusters"]]),
             "",
             f"**Terpilih:** min_cluster_size = {params['min_cluster_size']}, min_samples = {params['min_samples']}"
             + (" (FALLBACK: tidak ada kandidat valid)" if params["grid_fallback"] else ""),

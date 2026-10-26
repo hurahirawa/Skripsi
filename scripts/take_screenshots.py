@@ -109,7 +109,7 @@ def main() -> None:
             browser = p.chromium.launch()
             page = browser.new_context(viewport=VIEWPORT).new_page()
             page.goto(f"http://localhost:{args.port}")
-            page.get_by_role("heading", name="Pemetaan Karakteristik VoIP").wait_for()
+            page.get_by_role("heading", name="Pemetaan Karakteristik").wait_for()
             print("Menyimpan tangkapan layar:")
             shot(page, out, "01_home.png")
 
@@ -136,13 +136,17 @@ def main() -> None:
 
             go(page, "Analisis Evaluasi Klaster", "Analisis & Evaluasi Klaster")
             shot(page, out, "03_analisis_klaster.png")
+            shot_section(page, out, "03c_perbandingan_hdbscan_kmeans.png", "Perbandingan HDBSCAN vs K-Means")
+            shot_section(page, out, "03d_grid_hdbscan.png", "Grid HDBSCAN (min_cluster_size × min_samples)")
+            shot_section(page, out, "03e_centroid_batas_jarak.png", "Centroid dan batas jarak")
             page.get_by_text("Skala log").click()
             shot(page, out, "03b_analisis_klaster_skala_log.png")
 
-            go(page, "Pengaturan Parameter", "Pengaturan Parameter & Ambang Batas")
+            go(page, "Pengaturan Parameter", "Pengaturan Parameter")
             shot(page, out, "04_pengaturan.png")
+            shot_section(page, out, "04b_pengaturan_perbarui_deskripsi_latih_ulang.png", "Perbarui Deskripsi Klaster")
 
-            go(page, "Rekomendasi Ekspor", "Rekomendasi Mitigasi & Ekspor Laporan")
+            go(page, "Rekomendasi Ekspor", "Ekspor Laporan dan Saran Klaster")
             page.get_by_role("button", name="Buat PDF ringkasan").click()
             page.get_by_role("button", name="Unduh PDF ringkasan").wait_for()
             shot(page, out, "05_rekomendasi_ekspor.png")

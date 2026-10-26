@@ -1,15 +1,15 @@
-# Pemetaan Karakteristik VoIP Traffic Network untuk Identifikasi QoS menggunakan HDBSCAN
+# Pemetaan Karakteristik VoIP Traffic Network dengan Klasterisasi HDBSCAN
 
 Dashboard web lokal (Streamlit) untuk administrator jaringan yang:
 
-1. melatih model **HDBSCAN** secara offline dari statistik aliran (unsupervised);
-2. memberi label tiap klaster **QoS Baik / Cukup / Buruk** berdasarkan ITU-T G.114 (delay), ITU-T Y.1541 Kelas 0/1 (jitter), serta ITU-T G.1010 (conversational voice, PLR < 3%) dan panduan Cisco VoIP (PLR ≤ 1%) untuk packet loss, dengan noise (-1) sebagai **Anomali**;
-3. memetakan trafik per jendela waktu ke klaster yang sudah terbentuk (`hdbscan.approximate_predict`) lalu mewarisi label klaster;
-4. menampilkan label, visualisasi, dan rekomendasi mitigasi, serta menyimpan riwayat sesi ke CSV dan PDF.
+1. melatih model **HDBSCAN** secara offline dari statistik aliran (unsupervised), dengan **K-Means** sebagai pembanding;
+2. membentuk klaster bernomor 1..k (urut ukuran menurun; noise HDBSCAN = *Noise*) dan memprofilkan tiap klaster dalam satuan asli; posisi klaster terhadap ambang ITU (ITU-T G.114 delay, Y.1541 jitter, G.1010 dan panduan Cisco VoIP untuk loss) hanya ditampilkan sebagai **deskripsi**, bukan label kualitas;
+3. menugaskan trafik per jendela waktu ke **klaster terdekat berdasarkan jarak Euclidean ke centroid**; titik yang jaraknya ke setiap centroid melebihi batas klaster ditandai **Di luar klaster (terdekat: Klaster N)**;
+4. menampilkan klaster terdekat, jarak, visualisasi, dan saran berdasarkan karakteristik klaster, serta menyimpan riwayat sesi ke CSV dan PDF.
 
-Metodologi CRISP-DM. Tanpa database relasional (semua berbasis berkas). Spesifikasi lengkap ada di [`PRD.md`](PRD.md) (sumber kebenaran proyek ini); aturan kerja ada di [`CLAUDE.md`](CLAUDE.md).
+Metodologi CRISP-DM. Tanpa database relasional (semua berbasis berkas). Spesifikasi lengkap ada di [`PRD.md`](PRD.md) (sumber kebenaran proyek ini; revisi klasterisasi murni bertanda T2); aturan kerja ada di [`CLAUDE.md`](CLAUDE.md).
 
-> **Catatan penting tentang data dan hasil.** Data latih adalah CIC-Darknet2020 (`Darknet.CSV`, flow berlabel `VOIP`), bukan trafik yang dirancang khusus untuk VoIP. Setelah filter (tanpa Tor, fwd dan bwd ≥ 5 paket) tersisa **247 flow**. Model aktif saat ini tidak memiliki klaster "QoS Baik". Lihat bagian [Keterbatasan](#keterbatasan-dan-catatan-metodologi) sebelum mengutip angka.
+> **Catatan penting tentang data dan hasil.** Data latih adalah CIC-Darknet2020 (`Darknet.CSV`, flow berlabel `VOIP`), bukan trafik yang dirancang khusus untuk VoIP. Setelah filter (tanpa Tor, fwd dan bwd ≥ 5 paket) tersisa **247 flow**. Keluaran aplikasi adalah klaster terdekat, bukan penilaian QoS. Lihat bagian [Keterbatasan](#keterbatasan-dan-catatan-metodologi) sebelum mengutip angka.
 
 ## Daftar isi
 
@@ -97,14 +97,15 @@ python scripts/train.py --config config/default_config.yaml --activate # jadikan
 python scripts/train.py --source log                                   # latih dari log jendela monitoring
 ```
 
-Pipeline: baca CSV → filter VoIP → buang `exclude_traffic_types` (default `Tor`) dan flow dengan fwd/bwd < `min_session` (default 5/5) → cleaning (±inf→NaN, duplikat, negatif, imputasi median) → hitung `fai_pct` → `log1p` pada `iat_mean_us` dan `iat_std_us` → `StandardScaler` → grid search HDBSCAN → evaluasi (Silhouette tanpa noise, CHI, Noise Ratio) → profil klaster dan label ITU → simpan artefak.
+Pipeline: baca CSV → filter VoIP → buang `exclude_traffic_types` (default `Tor`) dan flow dengan fwd/bwd < `min_session` (default 5/5) → cleaning (±inf→NaN, duplikat, negatif, imputasi median) → hitung `fai_pct` → `log1p` pada `iat_mean_us` dan `iat_std_us` → `StandardScaler` → grid search HDBSCAN dengan ARI bootstrap tiap kandidat → seleksi final → centroid, batas jarak → K-Means pembanding → evaluasi, profil, dan deskripsi ITU → simpan artefak.
 
-- Fitur klaster default (Varian C): `[iat_mean_us, iat_std_us, fai_pct]`, dengan `log1p` pada dua kolom pertama dan **tanpa** log pada `fai_pct`. Proksi delay = *Flow IAT Mean*; jitter = *Flow IAT Std*; loss = FAI.
-- Pemilihan grid: Silhouette tertinggi, lalu CHI, lalu `min_cluster_size` terkecil, lalu `min_samples` terkecil. Aturan dan kandidat seri dicatat di `train_meta.json`.
-- Hasil reprodusibel (`random_state: 42`): latih ulang dari CSV dengan config default menghasilkan parameter, skor, klaster, dan label yang identik dengan versi `20261019_175647`.
-- Versi baru **tidak** menjadi aktif kecuali dengan `--activate` (atau bila belum ada versi aktif sama sekali).
+- Fitur klaster (Varian C): `[iat_mean_us, iat_std_us, fai_pct]`, `log1p` pada dua kolom pertama, **tanpa** log pada `fai_pct`. Proksi delay = *Flow IAT Mean*; jitter = *Flow IAT Std*; loss = FAI.
+- **Aturan seleksi HDBSCAN** (`hdbscan.selection`): kandidat valid = noise ≤ 20%, klaster ≥ 2, ARI bootstrap (50×, subsampel 80%) mean ≥ 0,90; dipilih **DBCV tertinggi**, seri → Silhouette, lalu `min_cluster_size` dan `min_samples` terkecil. Tanpa kandidat valid dipakai parameter tetap config (dicatat `grid_fallback`).
+- **Pembanding K-Means**: k = jumlah klaster HDBSCAN dan k optimal (rata-rata peringkat Silhouette dan DBI, k 2–10).
+- **Penugasan**: centroid = rata-rata anggota di ruang ter-skala. Batas "di luar klaster" (`assignment.limit_rule`, default `max_cluster_global`) = per klaster max(p95 jarak klaster, p95 global); titik di luar klaster bila jaraknya ke setiap centroid melebihi batas klaster itu.
+- Hasil reprodusibel (`random_state: 42`). Versi baru **tidak** menjadi aktif kecuali dengan `--activate` (atau bila belum ada versi aktif sama sekali).
 
-Hasil model aktif `20261019_175647` (247 flow): 8 klaster + noise, Silhouette 0,8866 (Strong Structure), CHI 7.554,68, Noise Ratio 13,77%, `min_cluster_size` 5, `min_samples` 5.
+Model aktif `20261027_005150` (247 flow): 5 klaster + noise, `min_cluster_size` 3, `min_samples` 8; HDBSCAN (tanpa noise) Silhouette 0,8767, DBI 0,2576, CHI 3.564,63, DBCV 0,7404, noise 13,36%, ARI 0,964 ± 0,024. Dengan noise di-assign ke centroid: Silhouette 0,7570, DBCV 0,3545. K-Means k=5: Silhouette 0,7729, DBCV 0,4258; K-Means k=3 (optimal): Silhouette 0,7787, DBCV −0,1737. Dasar keputusan: `reports/experiments/cluster_analysis.md` bagian F dan G (`scripts/cluster_analysis_final.py`, `scripts/cluster_analysis_selection.py`).
 
 ## Replay PCAP
 
@@ -129,9 +130,9 @@ python scripts/live_capture.py --backend scapy --interface "Wi-Fi" --seconds 30
 ```
 
 - **Backend default `scapy`** (butuh Npcap). `pyshark` adalah opsi (butuh TShark). Tidak ada fallback otomatis antar-backend; jika prasyarat tidak ada, aplikasi berhenti dengan pesan yang menyebut langkah perbaikannya.
-- **Filter BPF default**: `udp and not port 443 and not port 53 and not port 123 and not port 5353 and not port 1900`. Port tersebut (QUIC, DNS, NTP, mDNS, SSDP) di luar distribusi latih dan hanya menghasilkan label Anomali yang menyesatkan.
+- **Filter BPF default**: `udp and not port 443 and not port 53 and not port 123 and not port 5353 and not port 1900`. Port tersebut (QUIC, DNS, NTP, mDNS, SSDP) di luar distribusi latih dan hanya menghasilkan titik di luar klaster yang menyesatkan.
 - Jendela ditutup berdasarkan timestamp paket, ditambah detak `live_poll_sec` saat tidak ada paket.
-- Flow/jendela dengan fwd atau bwd < `monitoring.min_session_live` (default 5/5) tidak diprediksi: statusnya **"Data Belum Cukup"**, tetap dicatat di CSV, dan tidak dihitung sebagai Anomali maupun dalam `kritis_ratio`.
+- Flow/jendela dengan fwd atau bwd < `monitoring.min_session_live` (default 5/5) tidak diprediksi: statusnya **"Data Belum Cukup"**, dan tetap dicatat di CSV (tidak ditugaskan ke klaster).
 - Hanya statistik agregat dan alamat IP flow yang disimpan di `reports/riwayat/`; payload tidak pernah dibaca. Folder `reports/` tidak di-commit.
 
 ## Dashboard
@@ -145,19 +146,19 @@ Peluncur lokal (Windows, memakai `.venv`):
 - `run_app.bat` — server Streamlit headless dan browser terbuka otomatis (port 8501; ubah dengan `set PORT=...` sebelum menjalankan).
 - `run_desktop.bat` — jendela desktop "VoIP QoS Monitor" (pywebview, butuh WebView2 yang sudah ada di Windows 11); server berhenti saat jendela ditutup. Live capture butuh hak Administrator.
 
-Bagian atas Dashboard menampilkan **Status Koneksi Saat Ini** (banner berwarna: label terparah di antara panggilan aktif), status capture (paket, flow aktif, paket terakhir; peringatan bila belum ada paket) dan panel **Panggilan Aktif** (kartu per panggilan dengan label terbaru, delay/jitter/FAI, dan sparkline per jendela). Interface bawaan di sidebar adalah yang aktif dan terhubung; pilih manual bila perlu (mis. *Wi-Fi*, bukan adapter Bluetooth yang tidak aktif — sesi dengan interface mati menghasilkan 0 paket).
+Bagian atas Dashboard menampilkan banner **Status Saat Ini: paling dekat ke Klaster N (jarak X)** (kelompok terbanyak di antara panggilan aktif; berwarna klaster, abu-abu untuk *Di luar klaster*), status capture (paket, flow aktif, paket terakhir; peringatan bila belum ada paket), kartu jumlah flow per klaster dan *Di luar klaster*, serta panel **Panggilan Aktif** (kartu per panggilan: klaster terdekat, jarak dan batas, bar jarak ke semua centroid, delay/jitter/FAI, sparkline klaster per jendela). Interface bawaan di sidebar adalah yang aktif dan terhubung; pilih manual bila perlu (mis. *Wi-Fi*, bukan adapter Bluetooth yang tidak aktif — sesi dengan interface mati menghasilkan 0 paket).
 
-Sesi yang berakhir tanpa Stop tetap diringkas dengan status "Dihentikan tidak normal" (saat aplikasi ditutup atau capture error; bila proses dimatikan paksa, ringkasan ditulis saat aplikasi dibuka kembali setelah `monitoring.orphan_after_sec`). Halaman Rekomendasi & Ekspor memilih sesi terbaru otomatis.
+Sesi yang berakhir tanpa Stop tetap diringkas dengan status "Dihentikan tidak normal" (saat aplikasi ditutup atau capture error; bila proses dimatikan paksa, ringkasan ditulis saat aplikasi dibuka kembali setelah `monitoring.orphan_after_sec`). Halaman Saran & Ekspor memilih sesi terbaru otomatis.
 
-Flow sinyal SIP (port di `monitoring.signaling_ports`, default 5060/5061) diberi label "Sinyal SIP": dicatat di CSV jendela tetapi tidak diprediksi, tidak masuk kartu, status Kritis, ringkasan sesi, tabel panggilan, rekomendasi, maupun latih ulang; dashboard hanya menampilkan jumlahnya. Tabel *Panggilan Selesai* menampilkan kolom ringkas (kolom lengkap di expander *Detail*); beberapa panggilan yang selesai dalam satu siklus refresh digabung menjadi satu toast.
+Flow sinyal SIP (port di `monitoring.signaling_ports`, default 5060/5061) berstatus "Sinyal SIP": dicatat di CSV jendela tetapi tidak ditugaskan, tidak masuk kartu, ringkasan sesi, tabel panggilan, saran, maupun latih ulang. Tabel *Panggilan Selesai* menampilkan kolom ringkas (kolom lengkap di expander *Detail*); beberapa panggilan yang selesai dalam satu siklus refresh digabung menjadi satu toast.
 
 | Halaman | Isi |
 |---|---|
-| Home | Ringkasan model aktif dan alur kerja |
-| Dashboard Overview | 5 kartu (Total, Baik, Cukup, Buruk, Anomali), PCA scatter live, bar chart vs ambang ITU, tabel jendela terbaru, rekomendasi sesi berjalan; auto-refresh |
-| Analisis & Evaluasi Klaster | Silhouette (dengan interpretasi), CHI, Noise Ratio, tabel profil, box plot 3 metrik (toggle skala log), sampel data latih |
-| Pengaturan Parameter | Slider HDBSCAN, ambang ITU, Save/Reset, **Terapkan Ulang Pelabelan**, **Latih Ulang Model** (aktif setelah centang konfirmasi "Saya mengerti ini membuat versi model baru"), daftar dan aktivasi versi model |
-| Rekomendasi & Ekspor | Alert klaster bermasalah dan sesi Kritis dengan saran mitigasi, riwayat sesi, unduh CSV dan PDF |
+| Home | Ringkasan model aktif (Silhouette, DBCV, klaster, noise) dan alur kerja |
+| Dashboard Overview | Banner status, kartu per klaster + Di luar klaster, panggilan aktif, PCA scatter dengan centroid, deskripsi klaster, saran sesi berjalan, panggilan selesai, jendela terbaru; auto-refresh |
+| Analisis & Evaluasi Klaster | Metrik HDBSCAN (Silhouette, DBI, CHI, DBCV, noise, ARI), perbandingan HDBSCAN (dua versi) vs K-Means, kurva Elbow/Silhouette/DBI, heatmap grid dengan ARI, profil + deskripsi ITU, box plot dengan garis ambang ITU (toggle log), centroid dan batas jarak, sampel data latih |
+| Pengaturan Parameter | Slider HDBSCAN, aturan seleksi, aturan batas jarak, ambang ITU (hanya deskripsi), Save/Reset, **Perbarui Deskripsi Klaster** (tanpa refit), **Latih Ulang Model** (setelah centang konfirmasi), daftar dan aktivasi versi model |
+| Rekomendasi & Ekspor | Saran berdasarkan karakteristik klaster (bila `recommendations.enabled`), riwayat sesi, unduh CSV dan PDF |
 
 Sidebar (semua halaman): versi model aktif, mode Replay PCAP / Live, sumber, Start/Stop. Latih ulang dan pergantian model aktif dinonaktifkan selama monitoring berjalan.
 
@@ -167,9 +168,10 @@ Sidebar (semua halaman): versi model aktif, mode Replay PCAP / Live, sumber, Sta
 |---|---|
 | `config/default_config.yaml` | Seluruh parameter dan ambang (tidak ada angka ambang di kode) |
 | `config/user_config.yaml` | Dibuat oleh *Save Configuration*; menimpa default; tidak di-commit; dihapus oleh *Reset to Default* |
-| `config/recommendations.yaml` | Aturan saran mitigasi per metrik (Delay, Jitter, Packet Loss, Anomali) |
+| `config/recommendations.yaml` | Aturan saran per metrik yang melewati ambang (Delay, Jitter, Packet Loss) dan untuk Di luar klaster |
+| `config/analysis_config.yaml` | Analisis klasterisasi murni Tahap 1 (`scripts/cluster_analysis*.py`); tidak memengaruhi aplikasi |
 
-Ambang ITU default: delay 150/400 ms, jitter 50 ms, loss 1/3% (≤1% baik, 1–3% cukup, >3% buruk; sumber ITU-T G.1010 + panduan Cisco VoIP). **Hasil skripsi memakai ambang default**; mengubah ambang di UI hanya untuk eksplorasi.
+Ambang ITU default: delay 150/400 ms, jitter 50 ms, loss 1/3% (sumber ITU-T G.114, Y.1541, G.1010, dan panduan Cisco VoIP). Ambang **tidak memengaruhi klasterisasi atau penugasan**; hanya untuk deskripsi klaster, garis referensi grafik, dan saran. Saran dapat dimatikan dengan `recommendations.enabled: false`.
 
 Satuan internal: delay dan jitter dalam ms, loss dalam %; data CIC dalam µs dibagi 1000.
 
@@ -177,19 +179,19 @@ Satuan internal: delay dan jitter dalam ms, loss dalam %; data CIC dalam µs dib
 
 Setiap pelatihan membuat `artifacts/<YYYYMMDD_HHMMSS>/` dan `artifacts/current.txt` menunjuk versi aktif. Isi satu versi:
 
-`hdbscan_model.joblib`, `scaler.joblib`, `pca.joblib`, `cluster_profile.json`, `train_meta.json`, `grid_results.csv`, `training_sample.csv`.
+`hdbscan_model.joblib`, `kmeans_n.joblib` (k = klaster HDBSCAN), `kmeans_opt.joblib` (k optimal), `scaler.joblib`, `pca.joblib`, `assignment.json` (centroid ter-skala, batas per klaster, batas global, aturan), `cluster_profile.json` (evaluasi, perbandingan, kurva K-Means, profil dan deskripsi tiap klaster), `train_meta.json`, `grid_results.csv` (dengan ARI), `training_sample.csv`.
 
-- **Latih ulang** (halaman Pengaturan atau CLI) tidak pernah menimpa versi lama dan tidak mengubah `current.txt`; versi baru aktif hanya setelah tombol *Aktifkan model ini* (atau `--activate`).
-- **Sumber latih ulang**: CSV (Darknet/CIC) atau log jendela monitoring. Untuk log: baris *Data Belum Cukup* wajib dikecualikan; baris Anomali, baris `diimputasi = true`, dan baris dengan `feature_mode` selain yang diatur (default `cumulative`) dikecualikan sesuai `retrain.log_source`; CSV lama tanpa kolom `feature_mode`/`diimputasi` dianggap tidak diketahui dan dibuang; jumlah minimum baris (`min_rows`, default 200) dicek sebelum pelatihan.
-- **Terapkan Ulang Pelabelan** menghitung ulang label dari statistik tersimpan dengan ambang baru, **tanpa melatih ulang HDBSCAN**, dan menghasilkan versi baru (model, scaler, PCA disalin tanpa berubah).
-- `cluster_profile.json` memuat `metrik_penyebab` per klaster (mis. `"delay;loss"`); rekomendasi membaca kolom ini.
+- **Latih ulang** (halaman Pengaturan atau CLI) tidak pernah menimpa versi lama dan tidak mengubah `current.txt`; versi baru aktif hanya setelah *Aktifkan model ini* (atau `--activate`).
+- **Versi lama** (pelabelan QoS, tanpa `schema: klaster_murni`) tetap ada tetapi **ditolak saat diaktifkan dan saat dimuat** dengan pesan jelas; daftar versi menandainya `kompatibel = False`.
+- **Sumber latih ulang**: CSV (Darknet/CIC) atau log jendela monitoring. Untuk log: baris *Data Belum Cukup* dan *Sinyal SIP* dikecualikan; baris di luar klaster, baris `diimputasi = true`, dan baris dengan `feature_mode` selain yang diatur (default `cumulative`) dikecualikan sesuai `retrain.log_source`; jumlah minimum baris (`min_rows`, default 200) dicek sebelum pelatihan.
+- **Perbarui Deskripsi Klaster** menghitung ulang deskripsi posisi ITU dari statistik tersimpan dengan ambang baru, **tanpa melatih ulang**, dan menghasilkan versi baru (model, centroid, batas disalin tanpa berubah).
 
 ## Riwayat dan ekspor
 
-- `reports/riwayat/jendela_<id_sesi>.csv` — ditambah tiap jendela: `waktu_jendela, id_sesi, flow_id, delay_ms, jitter_ms, fwd, bwd, fai_pct, cluster_id, membership_prob, label, kategori_tindakan, metrik_penyebab, pc1, pc2, feature_mode, diimputasi`. `id_sesi` berakhiran 6 karakter acak.
-- `reports/riwayat/panggilan_<id_sesi>.csv` — satu baris per panggilan (flow) yang selesai: idle melewati `monitoring.call_end_idle_sec` (default 10 detik; efektif nilai terkecil dengan `flow_idle_timeout_sec`), atau saat Stop / PCAP habis. Kolom: `flow_id, waktu_mulai, waktu_selesai, durasi_s, total_fwd, total_bwd, delay_ms, jitter_ms, fai_pct, cluster_id, label_akhir, kategori_tindakan, metrik_penyebab, jumlah_jendela, persen_baik, persen_cukup, persen_buruk, persen_anomali, persen_belum_cukup, label_terburuk, catatan`. `label_akhir` = label jendela kumulatif terakhir; panggilan yang berakhir *Data Belum Cukup* tetap dicatat. **Pada `feature_mode: window`** nilai dan `label_akhir` hanya dari jendela terakhir (kolom `catatan` memberi peringatan); ringkasan panggilan yang sah hanya pada mode `cumulative`. Dashboard menampilkannya di panel *Panggilan Selesai* dan memunculkan toast saat panggilan selesai.
-- `reports/riwayat/riwayat_pemantauan_<waktu>.csv` — ringkasan sesi saat Stop (status "Kritis" bila proporsi QoS Buruk + Anomali > `kritis_ratio`, tidak menghitung *Data Belum Cukup*); kolom tambahan `jumlah_panggilan` dan `panggilan_baik/cukup/buruk/anomali/belum_cukup` (jumlah per kategori `label_akhir`).
-- `reports/exports/laporan_<id_sesi>.csv|pdf` — dibuat dari halaman *Rekomendasi & Ekspor* (PDF: info sesi dan model, distribusi label, rekomendasi, tabel panggilan selesai beserta rekomendasi per panggilan bermasalah, tabel aliran, profil klaster).
+- `reports/riwayat/jendela_<id_sesi>.csv` — ditambah tiap jendela: `waktu_jendela, id_sesi, flow_id, delay_ms, jitter_ms, fwd, bwd, fai_pct, status, klaster_terdekat, jarak_terdekat, di_luar_klaster, jarak_ke_klaster, klaster_kmeans5, pc1, pc2, feature_mode, diimputasi`. `status` = Terklaster | Di luar klaster | Data Belum Cukup | Sinyal SIP; `jarak_ke_klaster` berformat `1:0.123;2:1.402;…` (titik desimal); `klaster_kmeans5` = klaster terdekat menurut K-Means pembanding (k = jumlah klaster HDBSCAN; nama kolom tetap). `id_sesi` berakhiran 6 karakter acak.
+- `reports/riwayat/panggilan_<id_sesi>.csv` — satu baris per panggilan (flow) yang selesai: idle melewati `monitoring.call_end_idle_sec` (default 10 detik), atau saat Stop / PCAP habis. Kolom: `flow_id, waktu_mulai, waktu_selesai, durasi_s, total_fwd, total_bwd, delay_ms, jitter_ms, fai_pct, klaster_akhir, jarak_akhir, di_luar_klaster_akhir, status_akhir, jumlah_jendela, persen_per_klaster, persen_di_luar_klaster, persen_belum_cukup, klaster_terbanyak, pernah_di_luar_klaster, catatan`. `*_akhir` = jendela kumulatif terakhir; panggilan yang berakhir *Data Belum Cukup* tetap dicatat. **Pada `feature_mode: window`** nilai hanya dari jendela terakhir (kolom `catatan` memberi peringatan); ringkasan panggilan yang sah hanya pada mode `cumulative`.
+- `reports/riwayat/riwayat_pemantauan_<waktu>.csv` — ringkasan sesi saat Stop: `status_sesi` (Selesai | Dihentikan tidak normal | Tidak ada data), `jumlah_panggilan`, `panggilan_per_klaster` (`1:3;2:1`), `panggilan_di_luar_klaster`, `persen_di_luar_klaster`, `klaster_mayoritas`, `panggilan_belum_cukup`, serta skor model (`skor_silhouette, skor_dbcv, skor_chi, noise_ratio`). Tidak ada status "Kritis".
+- `reports/exports/laporan_<id_sesi>.csv|pdf` — dibuat dari halaman *Rekomendasi & Ekspor* (PDF: info sesi dan model, distribusi klaster, saran berdasarkan karakteristik klaster, tabel panggilan selesai beserta saran per panggilan, tabel aliran, profil klaster dengan deskripsi ITU).
 
 ## Tangkapan layar
 
@@ -201,16 +203,16 @@ python -m playwright install chromium
 python scripts/take_screenshots.py [--pcap data/sample_pcap/<berkas>.pcap] [--speed 3]
 ```
 
-Berkas: `01_home`, `02_dashboard_replay`, `03_analisis_klaster`, `03b_analisis_klaster_skala_log`, `04_pengaturan`, `05_rekomendasi_ekspor`, `05b_rekomendasi_riwayat_laporan_sesi`, `02b_toast_panggilan_selesai`, `02c_dashboard_panggilan_selesai`, `05c_rekomendasi_panggilan_per_sesi`. Tabel riwayat pada tangkapan memuat semua sesi yang ada di `reports/riwayat/`; kosongkan atau pindahkan folder itu lebih dulu bila ingin riwayat yang bersih.
+Berkas: `01_home`, `02_dashboard_replay`, `02b_toast_panggilan_selesai`, `02c_dashboard_panggilan_selesai`, `03_analisis_klaster`, `03c_perbandingan_hdbscan_kmeans`, `03d_grid_hdbscan`, `03e_centroid_batas_jarak`, `03b_analisis_klaster_skala_log`, `04_pengaturan`, `04b_pengaturan_perbarui_deskripsi_latih_ulang`, `05_rekomendasi_ekspor`, `05b_rekomendasi_riwayat_laporan_sesi`, `05c_rekomendasi_panggilan_per_sesi`. Tabel riwayat pada tangkapan memuat semua sesi yang ada di `reports/riwayat/`; kosongkan atau pindahkan folder itu lebih dulu bila ingin riwayat yang bersih.
 
 ## Pengujian
 
 ```powershell
-pytest                       # seluruh uji (±240 uji, ±20 detik)
-pytest tests/test_profile.py # uji Lampiran 5 (PRD §13)
+pytest                       # seluruh uji (±290 uji, ±1 menit)
+pytest tests/test_profile.py # uji Lampiran 5 (statistik, box plot, FAI, noise ratio) dan deskripsi ITU
 ```
 
-- Test Lampiran 5 memakai `tests/fixtures/lampiran_l21.csv` (data naskah lama).
+- Test Lampiran 5 memakai `tests/fixtures/lampiran_l21.csv` (data naskah lama); uji label QoS dihapus karena aplikasi tidak lagi melabeli. Penugasan centroid, aturan batas (a/b/c), di luar klaster, nomor klaster 1..k, kolom CSV, dan perbandingan K-Means diuji di `tests/test_assignment.py`, `test_train.py`, `test_engine.py`.
 - `tests/fixtures/sample_real_10.csv` berisi 10 flow nyata dari 247 flow final (dibuat `scripts/make_sample_fixture.py`); nilai antara untuk Lampiran 2–5 ada di `reports/lampiran/lampiran_data.md`.
 - Uji UI memakai `streamlit.testing.v1.AppTest` dengan config dan model sintetis terisolasi (variabel `QOS_CONFIG`).
 
@@ -230,8 +232,9 @@ pytest tests/test_profile.py # uji Lampiran 5 (PRD §13)
 │   ├── config.py
 │   ├── data/          loader.py (muat CSV, filter VoIP)  eda.py
 │   ├── features/      extract.py (delay/jitter/FAI)  preprocess.py (cleaning, imputasi, scaler, fitur)
-│   ├── model/         train.py  evaluate.py  retrain.py  versions.py
-│   ├── profiling/     profile.py (statistik, box plot, PLR)  labeling.py (aturan ITU)
+│   ├── model/         train.py  evaluate.py  assignment.py (centroid, batas, penugasan)  retrain.py  versions.py
+│   ├── profiling/     profile.py (statistik, box plot, centroid)  describe.py (deskripsi posisi ITU)
+│   ├── analysis/      analisis klasterisasi Tahap 1 (laporan cluster_analysis.md)
 │   ├── capture/       flow_table.py  sniffer.py (replay, scapy, pyshark)  demo.py (PCAP sintetis)
 │   ├── monitor/       engine.py (inferensi, sesi, riwayat)
 │   ├── recommend/     rules.py
@@ -247,11 +250,13 @@ pytest tests/test_profile.py # uji Lampiran 5 (PRD §13)
 
 - **Data bukan khusus VoIP.** Filter `VOIP` pada Darknet menghasilkan 3.566 flow; setelah pengecualian Tor dan filter sesi tersisa 247 (193 UDP, 54 TCP). Jumlah ini kecil untuk grid `min_cluster_size` hingga 25.
 - **Semantik fitur bergeser.** Data latih adalah statistik seluruh flow (hingga 120 detik), sedangkan live memakai statistik kumulatif sejak awal flow atau per jendela 5 detik.
-- **Kelas "QoS Cukup" kosong** pada model aktif (`20261022_120925`, hasil Terapkan Ulang Pelabelan dari `20261019_204042` dengan ambang loss 1/3%): Baik 49,8% (klaster 5, 123 flow), Buruk 36,4%, Anomali 13,8%. Satu-satunya klaster dengan loss level 2 (klaster 7, PLR 2,37%) juga melanggar jitter, sehingga tetap Buruk. Dengan ambang Y.1541 0,1% sebelumnya, klaster terbesar berlabel Buruk hanya karena PLR 0,1053%; FAI bersifat diskret sehingga ambang itu terlalu ketat (lihat `reports/experiments/labeling_scenarios.md`). P99,9 jitter pada klaster kecil ≈ nilai maksimum klaster.
-- **Silhouette tinggi tidak otomatis berarti klaster bermakna QoS**; ekor ekstrem pada fitur dapat membentuk klaster tersendiri (lihat `scripts/compare_variants.py` untuk perbandingan varian fitur).
+- **Tidak ada penilaian QoS.** Klaster hanya mengelompokkan karakteristik (IAT mean, IAT std, FAI). Deskripsi ITU memakai median klaster dan FAI sebagai proksi loss; klaster 2 dan 3 (delay median 2,9 dan 9,1 detik) menunjukkan aliran lambat/jarang pada data latih, bukan panggilan VoIP berkualitas buruk.
+- **Stabilitas.** Banyak kandidat grid berklaster 5 yang metriknya sama persis; pemilihan DBCV + ARI ≥ 0,90 memilih `min_cluster_size` 3 dan `min_samples` 8 (ARI 0,964). Konfigurasi dengan 8 klaster (DBCV 0,758) tidak stabil (ARI 0,843 ± 0,232).
+- **Batas jarak** klaster padat sangat kecil (mis. p95 0,023 pada klaster 3 bila dipakai per klaster); aturan `max_cluster_global` menaikkannya ke batas global 0,443. Pada 247 flow aturan ini menandai 90,9% noise latih (30/33) dan 1,4% non-noise (3/214) sebagai di luar klaster.
+- **Silhouette tinggi tidak otomatis berarti klaster bermakna QoS**; ekor ekstrem pada fitur dapat membentuk klaster tersendiri (lihat `scripts/compare_variants.py`).
 - **Demo PCAP bersifat sintetis** (`--make-demo`). Perbandingan `window` vs `cumulative` pada PCAP VoIP nyata belum dilakukan.
 - **Backend pyshark** belum diuji dengan TShark sungguhan.
-- **Kelas "Anomali"** hanya mendapat saran Anomali (investigasi kasus tunggal), sesuai Lampiran 5 naskah.
+- **Titik "Di luar klaster"** hanya mendapat saran investigasi kasus tunggal; saran per klaster hanya untuk metrik yang melewati ambang ITU.
 
 ## Jangan di-commit
 

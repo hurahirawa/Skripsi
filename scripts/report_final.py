@@ -1,7 +1,7 @@
-"""Laporan konfigurasi final (M1): jumlah flow, ringkasan fitur, dan distribusi tingkat ITU per flow.
+"""Laporan konfigurasi final (M1): jumlah flow, ringkasan fitur, dan distribusi posisi terhadap ambang ITU per flow.
 
-Tingkat ITU dihitung per flow SEBELUM klasterisasi (delay = iat_mean, jitter = iat_std, loss = FAI),
-hanya sebagai gambaran sebaran; pelabelan sebenarnya per klaster (P99,9 jitter, PLR) ada di M2.
+Posisi dihitung per flow SEBELUM klasterisasi (delay = iat_mean, jitter = iat_std, loss = FAI), hanya sebagai
+gambaran sebaran (deskriptif, bukan label kualitas); deskripsi per klaster ada di profil model.
 
 Pemakaian: python scripts/report_final.py --config config/default_config.yaml [--data path] [--out folder]
 """
@@ -17,7 +17,7 @@ import pandas as pd
 from qos.config import load_config, resolve_path, setup_logging
 from qos.data.loader import filter_voip, load_flows
 from qos.features.preprocess import apply_session_filters, compute_fai
-from qos.profiling.labeling import flow_levels
+from qos.profiling.describe import position
 
 PERCENTILES = (0.5, 0.95)
 
@@ -84,7 +84,13 @@ def main() -> None:
     fai = compute_fai(final["fwd_packets_count"], final["bwd_packets_count"], cfg["features"]["fai_clip_negative"])
     delay_ms = final["iat_mean_us"] / 1000
     jitter_ms = final["iat_std_us"] / 1000
-    levels = flow_levels(delay_ms, jitter_ms, fai, th)
+    levels = pd.DataFrame(
+        {
+            m: s.map(lambda v, m=m: position(m, v, th) if pd.notna(v) else np.nan)
+            for m, s in (("delay", delay_ms), ("jitter", jitter_ms), ("loss", fai))
+        }
+    )
+    levels["total"] = levels.max(axis=1, skipna=False)
 
     warn_min = data_cfg["voip_filter"]["min_flows_warning"]
     ms, ex = data_cfg["min_session"], data_cfg["exclude_traffic_types"]
@@ -123,10 +129,10 @@ def main() -> None:
             "jitter_ms (iat_std/1000)": jitter_ms,
         })),
         "",
-        "## Distribusi tingkat ITU per flow (sebelum klasterisasi)",
+        "## Distribusi posisi terhadap ambang ITU per flow (sebelum klasterisasi)",
         "",
-        "L1 = baik, L2 = cukup (hanya delay), L3 = buruk; total = max ketiga metrik.",
-        "Per flow: jitter memakai iat_std (bukan P99,9 klaster) dan loss memakai FAI ter-clip (= PLR satu flow).",
+        "L1 = di dalam batas baik, L2 = di antara batas baik dan maksimum, L3 = melewati batas maksimum; total = max ketiga metrik (deskriptif).",
+        "Per flow: jitter memakai iat_std dan loss memakai FAI ter-clip.",
         "",
         _md(distribution(levels)),
         "",

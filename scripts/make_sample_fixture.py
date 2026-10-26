@@ -1,11 +1,11 @@
 """Buat fixture 10 flow nyata (dari flow final) dan data antara untuk Lampiran 2–5 naskah.
 
 Keluaran:
-  tests/fixtures/sample_real_10.csv       10 flow mentah + label klaster model aktif
+  tests/fixtures/sample_real_10.csv       10 flow mentah + nomor klaster model aktif
   reports/lampiran/lampiran_data.md       FAI, log1p, Z-score, penugasan klaster, dan profil
 
 Pemilihan: 1 flow dari tiap klaster (termasuk noise), sisa slot dibagi ke klaster terbesar;
-pengacakan memakai data.random_state. Label klaster berasal dari model aktif (artifacts/current.txt).
+pengacakan memakai data.random_state. Nomor klaster berasal dari model aktif (artifacts/current.txt).
 
 Pemakaian: python scripts/make_sample_fixture.py --config config/default_config.yaml
 """
@@ -101,7 +101,7 @@ def main() -> None:
         final = apply_session_filters(filter_voip(raw, cfg["data"]["voip_filter"]), cfg["data"])
     if len(final) != len(sample) or not np.allclose(final["iat_mean_us"], sample["iat_mean_us"]):
         raise SystemExit("Flow final tidak selaras dengan training_sample.csv model aktif; latih ulang atau cek config")
-    final = final.assign(cluster=sample["cluster_id"].to_numpy(), membership_prob=sample["membership_prob"].to_numpy())
+    final = final.assign(cluster=sample["cluster_id"].to_numpy(), jarak_terdekat=sample["jarak_terdekat"].to_numpy())
 
     pick = final.iloc[select_indices(final["cluster"].to_numpy(), args.n, seed)].copy()
     pick.insert(0, "sample", [f"s{i}" for i in range(1, len(pick) + 1)])
@@ -123,7 +123,7 @@ def main() -> None:
     raw_fai = (d["fwd_packets_count"] - d["bwd_packets_count"]) / d["fwd_packets_count"] * 100
     logged = build_features(d, feat["cluster_columns"], feat["log_transform"])
     z = pd.DataFrame(scaler.transform(logged), columns=[f"z_{c}" for c in logged.columns], index=d.index)
-    labels = {int(k): v for k, v in model_profile["label_map"].items()}
+    labels = {int(c["id_klaster"]): c["deskripsi"]["ringkas"] for c in model_profile["clusters"]}
 
     t_raw = d[["sample", "flow_id", "src_ip", "dst_ip", "protocol", "duration_us", "fwd_packets_count",
                "bwd_packets_count", "iat_mean_us", "iat_std_us"]]
@@ -136,8 +136,8 @@ def main() -> None:
         axis=1,
     )
     t_assign = pd.DataFrame(
-        {"sample": d["sample"], "cluster": d["cluster"], "membership_prob": d["membership_prob"],
-         "label_model": [labels[int(c)] for c in d["cluster"]]}
+        {"sample": d["sample"], "cluster": d["cluster"], "jarak_terdekat": d["jarak_terdekat"],
+         "deskripsi_klaster": [labels[int(c)] for c in d["cluster"]]}
     )
     scaler_tbl = pd.DataFrame(
         {"fitur": logged.columns, "mean": scaler.mean_, "scale (std)": scaler.scale_,
@@ -149,12 +149,11 @@ def main() -> None:
             {
                 "klaster": c["id_klaster"], "n": c["jumlah_anggota"],
                 "mean delay": c["statistik"]["delay_ms"]["mean"], "std delay": c["statistik"]["delay_ms"]["std"] or np.nan,
-                "P99,9 jitter": c["statistik_pelabelan"]["p999_jitter_ms"], "PLR %": c["statistik_pelabelan"]["plr_pct"],
+                "P99,9 jitter": c["statistik_tambahan"]["p999_jitter_ms"], "PLR %": c["statistik_tambahan"]["plr_pct"],
                 "Q1 delay": c["boxplot"]["delay_ms"]["q1"], "Q3 delay": c["boxplot"]["delay_ms"]["q3"],
                 "pagar bawah": c["boxplot"]["delay_ms"]["lower_fence"], "pagar atas": c["boxplot"]["delay_ms"]["upper_fence"],
                 "whisker": f"{c['boxplot']['delay_ms']['whisker_low']:.2f} / {c['boxplot']['delay_ms']['whisker_high']:.2f}",
-                "level D/J/L": "/".join(str(c["tingkat"][m]) for m in ("delay", "jitter", "loss")),
-                "label (10 sampel)": c["label"], "label (model, 247 flow)": labels[c["id_klaster"]],
+                "deskripsi (10 sampel)": c["deskripsi"]["ringkas"], "deskripsi (model, 247 flow)": labels.get(c["id_klaster"], "-"),
             }
             for c in sample_profile
         ]
@@ -162,9 +161,9 @@ def main() -> None:
     ev = model_profile["evaluation"]
     t_model = pd.DataFrame(
         [
-            {"klaster": c["id_klaster"], "n": c["jumlah_anggota"], "mean delay": c["statistik_pelabelan"]["mean_delay_ms"],
-             "P99,9 jitter": c["statistik_pelabelan"]["p999_jitter_ms"], "PLR %": c["statistik_pelabelan"]["plr_pct"],
-             "label": c["label"]}
+            {"klaster": c["id_klaster"], "n": c["jumlah_anggota"], "mean delay": c["statistik_tambahan"]["mean_delay_ms"],
+             "P99,9 jitter": c["statistik_tambahan"]["p999_jitter_ms"], "PLR %": c["statistik_tambahan"]["plr_pct"],
+             "deskripsi": c["deskripsi"]["ringkas"]}
             for c in model_profile["clusters"]
         ]
     )
@@ -186,9 +185,9 @@ def main() -> None:
         "## Tabel 3 — Fitur klaster: log1p dan Z-score (Lampiran 3)", "", md(t_feat), "",
         "Parameter StandardScaler (dari model aktif):", "", md(scaler_tbl), "",
         "## Tabel 4 — Penugasan klaster (Lampiran 4)", "",
-        "`cluster` dan `membership_prob` dari model aktif yang dilatih pada 247 flow.", "", md(t_assign), "",
+        "`cluster` dan `jarak_terdekat` dari model aktif yang dilatih pada 247 flow (bernomor mulai 1; -1 = noise latih).", "", md(t_assign), "",
         "## Tabel 5 — Profil dari 10 sampel (Lampiran 5)", "",
-        "Dihitung dari 10 flow ini saja (seperti Lampiran 5 lama); label model memakai statistik seluruh klaster.", "",
+        "Dihitung dari 10 flow ini saja (seperti Lampiran 5 lama); deskripsi model memakai statistik seluruh klaster.", "",
         md(t_prof), "",
         "## Tabel 6 — Profil model aktif (247 flow)", "",
         f"Silhouette = {ev['silhouette']:.4f} ({ev['silhouette_label']}) · CHI = {ev['chi']:,.2f} · "
