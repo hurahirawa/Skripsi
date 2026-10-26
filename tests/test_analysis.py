@@ -188,3 +188,58 @@ def test_config_analisis_lengkap_dan_default_tidak_berubah():
     assert {v for s in acfg["sets"] for v in s["feature_variants"]} <= set(acfg["features"])
     default = yaml.safe_load(Path(PROJECT_ROOT / "config" / "default_config.yaml").read_text("utf-8"))
     assert "analysis" not in default  # blok analisis terpisah dari config default
+
+
+# ---- Bagian F: ambang ITU, batas jarak, kandidat jumlah klaster ----
+from qos.analysis.final import add_itu_column, centroids_original_units, distance_limits, far_from_all, itu_position  # noqa: E402
+
+THRESH = {"delay_good_ms": 150.0, "delay_max_ms": 400.0, "jitter_max_ms": 50.0, "loss_good_pct": 1.0, "loss_max_pct": 3.0}
+
+
+def test_select_hdbscan_max_clusters_membatasi_kandidat():
+    grid = pd.DataFrame({
+        "min_cluster_size": [3, 5, 8], "min_samples": [1, 1, 1], "n_clusters": [8.0, 5.0, 3.0],
+        "noise_ratio": [0.1, 0.1, 0.1], "silhouette": [0.8, 0.7, 0.6], "dbcv": [0.9, 0.5, 0.4],
+    })
+    assert cl.select_hdbscan(grid, 2, 0.5, "dbcv")[0]["n_clusters"] == 8
+    best, reason = cl.select_hdbscan(grid, 3, 0.5, "dbcv", max_clusters=5)
+    assert best["n_clusters"] == 5 and "3–5" in reason
+    assert cl.select_hdbscan(grid, 2, 0.5, "silhouette")[0]["silhouette"] == 0.8
+
+
+@pytest.mark.parametrize(
+    "delay,jitter,fai,expected",
+    [
+        (10, 6, 0.0, "delay ≤150 ms; jitter ≤50 ms; FAI ≤1 %"),
+        (150, 50, 1.0, "delay ≤150 ms; jitter ≤50 ms; FAI ≤1 %"),   # batas inklusif
+        (200, 51, 2.0, "delay 150–400 ms; jitter >50 ms; FAI 1–3 %"),
+        (401, 10, 3.5, "delay >400 ms; jitter ≤50 ms; FAI >3 %"),
+    ],
+)
+def test_itu_position(delay, jitter, fai, expected):
+    assert itu_position(delay, jitter, fai, THRESH) == expected
+
+
+def test_add_itu_column_memakai_median():
+    prof = pd.DataFrame({"delay_median_ms": [10.0], "jitter_median_ms": [60.0], "fai_median_pct": [0.0]})
+    assert add_itu_column(prof, THRESH)["posisi ITU (median)"].iloc[0] == "delay ≤150 ms; jitter >50 ms; FAI ≤1 %"
+
+
+def test_distance_limits_dan_far_from_all(blobs):
+    X, y = blobs
+    limits = distance_limits(X, y, 95)
+    cents = cl.centroids(X, y)
+    own = np.linalg.norm(X[y == 0] - cents[0], axis=1)
+    assert limits[0] == pytest.approx(np.percentile(own, 95))
+    probe = np.array([[0.0, 0.0], [5.0, 5.0], [10.0, 0.0]])  # dua di klaster, satu jauh dari semua
+    assert far_from_all(probe, cents, limits).tolist() == [False, True, False]
+
+
+def test_centroids_original_units_invers_transform():
+    from sklearn.preprocessing import StandardScaler
+    raw = pd.DataFrame({"iat_mean_us": [1000.0, 9000.0, 99000.0], "iat_std_us": [0.0, 2000.0, 8000.0], "fai_pct": [0.0, 5.0, 10.0]})
+    feats = transform_features(raw, list(raw.columns), ["iat_mean_us", "iat_std_us"])
+    scaler = StandardScaler().fit(feats)
+    out = centroids_original_units({1: scaler.transform(feats).mean(axis=0)}, scaler, list(raw.columns), ["iat_mean_us", "iat_std_us"])
+    assert out["delay_ms"].iloc[0] == pytest.approx(np.expm1(np.log1p(raw["iat_mean_us"]).mean()) / 1000)  # µs → ms
+    assert out["fai_pct"].iloc[0] == pytest.approx(5.0)

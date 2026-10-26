@@ -60,3 +60,12 @@ analysis:
   plots:
     dpi: 130
     max_scatter_points: 6000
+  final:                                     # Bagian F: analisis lengkap pada himpunan data utama keputusan (ditambahkan ke laporan, tidak menimpa A-E)
+    set_name: sesi_5_5_tanpa_tor             # fwd >= 5, bwd >= 5, tanpa Tor
+    variant: base
+    hdbscan:                                 # grid lebih rapat karena data kecil (~247 flow)
+      min_cluster_size: [3, 5, 8, 10, 15, 20, 30, 50]
+      min_samples: [1, 2, 3, 5, 8, 10, 15]
+    candidate_clusters: [3, 5]               # kandidat terbaik dengan jumlah klaster di rentang ini (inklusif)
+    distance_limit_percentile: 95            # batas "jauh dari semua klaster" = persentil ini dari jarak ke centroid sendiri
+    report_marker: "<!-- BAGIAN-F -->"

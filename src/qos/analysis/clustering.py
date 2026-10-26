@@ -115,22 +115,25 @@ def select_kmeans_k(sweep: pd.DataFrame, rank_metrics: list[str]) -> tuple[int, 
     return k, reason
 
 
-def select_hdbscan(grid: pd.DataFrame, min_clusters: int, max_noise: float, metric: str) -> tuple[pd.Series, str]:
+def select_hdbscan(
+    grid: pd.DataFrame, min_clusters: int, max_noise: float, metric: str, max_clusters: int | None = None
+) -> tuple[pd.Series, str]:
     """Parameter HDBSCAN: DBCV (atau `metric`) tertinggi di antara kombinasi dengan klaster >= min_clusters dan noise <= max_noise.
 
     Seri → Silhouette lebih tinggi. Jika tak ada kombinasi memenuhi batas, batas noise dilonggarkan (dicatat di alasan).
     """
-    ok = grid[(grid["n_clusters"] >= min_clusters) & (grid["noise_ratio"] <= max_noise) & grid[metric].notna()]
+    cap = grid["n_clusters"] <= (np.inf if max_clusters is None else max_clusters)
+    ok = grid[(grid["n_clusters"] >= min_clusters) & cap & (grid["noise_ratio"] <= max_noise) & grid[metric].notna()]
     note = ""
     if ok.empty:
-        ok = grid[(grid["n_clusters"] >= min_clusters) & grid[metric].notna()]
+        ok = grid[(grid["n_clusters"] >= min_clusters) & cap & grid[metric].notna()]
         note = f" Tidak ada kombinasi dengan noise <= {max_noise:.0%}; batas noise dilonggarkan."
     if ok.empty:
         raise ValueError("Tidak ada kombinasi HDBSCAN dengan >= 2 klaster dan metrik valid")
     best = ok.sort_values([metric, "silhouette"], ascending=False).iloc[0]
     reason = (
         f"min_cluster_size={int(best['min_cluster_size'])}, min_samples={int(best['min_samples'])}: {metric.upper()} tertinggi "
-        f"({best[metric]:.4f}) di antara {len(ok)} kombinasi dengan >= {min_clusters} klaster dan noise <= {max_noise:.0%}; "
+        f"({best[metric]:.4f}) di antara {len(ok)} kombinasi dengan {f'>= {min_clusters}' if max_clusters is None else f'{min_clusters}–{max_clusters}'} klaster dan noise <= {max_noise:.0%}; "
         f"{int(best['n_clusters'])} klaster, noise {best['noise_ratio']:.1%}, Silhouette {best['silhouette']:.4f}.{note}"
     )
     return best, reason
