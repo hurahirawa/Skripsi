@@ -94,7 +94,8 @@ python scripts/report_final.py --config config/default_config.yaml # konfigurasi
 python scripts/train.py --config config/default_config.yaml            # grid search + simpan versi baru
 python scripts/train.py --config config/default_config.yaml --no-grid  # pakai min_cluster_size/min_samples dari config
 python scripts/train.py --config config/default_config.yaml --activate # jadikan versi ini aktif
-python scripts/train.py --source log                                   # latih dari log jendela monitoring
+python scripts/backfill_data_latih.py                                  # buat data_latih.csv model aktif tanpa refit (sekali, untuk versi lama)
+python scripts/train.py --upload panggilan_x.csv Darknet2.csv --mode tambah   # latih ulang dari unggahan CSV (tambah | ganti)
 ```
 
 Pipeline: baca CSV → filter VoIP → buang `exclude_traffic_types` (default `Tor`) dan flow dengan fwd/bwd < `min_session` (default 5/5) → cleaning (±inf→NaN, duplikat, negatif, imputasi median) → hitung `fai_pct` → `log1p` pada `iat_mean_us` dan `iat_std_us` → `StandardScaler` → grid search HDBSCAN dengan ARI bootstrap tiap kandidat → seleksi final → centroid, batas jarak → K-Means pembanding → evaluasi, profil, dan deskripsi ITU → simpan artefak.
@@ -157,7 +158,7 @@ Flow sinyal SIP (port di `monitoring.signaling_ports`, default 5060/5061) bersta
 | Home | Ringkasan model aktif (Silhouette, DBCV, klaster, noise) dan alur kerja |
 | Dashboard Overview | Banner status, kartu per klaster + Di luar klaster, panggilan aktif, PCA scatter dengan centroid, deskripsi klaster, saran sesi berjalan, panggilan selesai, jendela terbaru; auto-refresh |
 | Analisis & Evaluasi Klaster | Metrik HDBSCAN (Silhouette, DBI, CHI, DBCV, noise, ARI), perbandingan HDBSCAN (dua versi) vs K-Means, kurva Elbow/Silhouette/DBI, heatmap grid dengan ARI, profil + deskripsi ITU, box plot dengan garis ambang ITU (toggle log), centroid dan batas jarak, sampel data latih |
-| Pengaturan Parameter | Slider HDBSCAN, aturan seleksi, aturan batas jarak, ambang ITU (hanya deskripsi), Save/Reset, **Perbarui Deskripsi Klaster** (tanpa refit), **Latih Ulang Model** (setelah centang konfirmasi), daftar dan aktivasi versi model |
+| Pengaturan Parameter | Slider HDBSCAN, aturan seleksi, aturan batas jarak, ambang ITU (hanya deskripsi), Save/Reset, **Perbarui Deskripsi Klaster** (tanpa refit), **Latih Ulang Model** (unggah CSV, mode Tambah/Ganti, pratinjau, perbandingan, pemetaan klaster), daftar dan aktivasi versi model |
 | Rekomendasi & Ekspor | Saran berdasarkan karakteristik klaster (bila `recommendations.enabled`), riwayat sesi, unduh CSV dan PDF |
 
 Sidebar (semua halaman): versi model aktif, mode Replay PCAP / Live, sumber, Start/Stop. Latih ulang dan pergantian model aktif dinonaktifkan selama monitoring berjalan.
@@ -179,13 +180,28 @@ Satuan internal: delay dan jitter dalam ms, loss dalam %; data CIC dalam µs dib
 
 Setiap pelatihan membuat `artifacts/<YYYYMMDD_HHMMSS>/` dan `artifacts/current.txt` menunjuk versi aktif. Isi satu versi:
 
-`hdbscan_model.joblib`, `kmeans_n.joblib` (k = klaster HDBSCAN), `kmeans_opt.joblib` (k optimal), `scaler.joblib`, `pca.joblib`, `assignment.json` (centroid ter-skala, batas per klaster, batas global, aturan), `cluster_profile.json` (evaluasi, perbandingan, kurva K-Means, profil dan deskripsi tiap klaster), `train_meta.json`, `grid_results.csv` (dengan ARI), `training_sample.csv`.
+`hdbscan_model.joblib`, `kmeans_n.joblib` (k = klaster HDBSCAN), `kmeans_opt.joblib` (k optimal), `scaler.joblib`, `pca.joblib`, `assignment.json` (centroid ter-skala, batas per klaster, batas global, aturan), `cluster_profile.json` (evaluasi, perbandingan, kurva K-Means, profil dan deskripsi tiap klaster), `train_meta.json`, `grid_results.csv` (dengan ARI), `training_sample.csv`, `data_latih.csv` (seluruh baris latih versi itu).
 
 - **Latih ulang** (halaman Pengaturan atau CLI) tidak pernah menimpa versi lama dan tidak mengubah `current.txt`; versi baru aktif hanya setelah *Aktifkan model ini* (atau `--activate`).
 - **Versi lama** (pelabelan QoS, tanpa `schema: klaster_murni`) tetap ada tetapi **ditolak saat diaktifkan dan saat dimuat** dengan pesan jelas; daftar versi menandainya `kompatibel = False`.
-- **Sumber latih ulang**: CSV (Darknet/CIC) atau log jendela monitoring. Untuk log: baris *Data Belum Cukup* dan *Sinyal SIP* dikecualikan; baris di luar klaster, baris `diimputasi = true`, dan baris dengan `feature_mode` selain yang diatur (default `cumulative`) dikecualikan sesuai `retrain.log_source`; jumlah minimum baris (`min_rows`, default 200) dicek sebelum pelatihan.
+- **Latih ulang dari unggahan CSV** — lihat bagian berikut. Sumber lama (log jendela, `data.raw_dir` di UI, `--source`) sudah dihapus.
 - Deskripsi klaster memuat median total paket, median durasi flow (detik), dan % UDP/TCP: `Klaster 2 · 32 paket · 90 dtk · Delay >400 · Jitter >50 · Loss ≤1`.
 - **Perbarui Deskripsi Klaster** menghitung ulang deskripsi posisi ITU dari statistik tersimpan (profil lama melengkapi karakter dari `training_sample.csv`) dengan ambang baru, **tanpa melatih ulang**, dan menghasilkan versi baru (model, centroid, batas disalin tanpa berubah).
+
+## Latih ulang dengan unggah CSV
+
+Dari sudut pengguna (halaman **Pengaturan Parameter → Latih Ulang Model**; Start/Stop monitoring harus sedang berhenti):
+
+1. *(Opsional)* **Unduh data latih model aktif (CSV)** untuk melihat data yang sekarang dipakai.
+2. **Unggah** satu atau beberapa CSV: `panggilan_<id_sesi>.csv` dari `reports/riwayat/` (hasil monitoring) dan/atau CSV flow format Darknet/CIC/BCCC. Format lain ditolak dengan pesan yang menyebut kolom yang kurang.
+3. Pilih mode: **Tambah ke data latih** (data latih model aktif + data baru) atau **Ganti data latih** (hanya data baru).
+4. Baca **pratinjau**: format terdeteksi, jumlah baris di tiap tahap filter per berkas (Sinyal SIP, Data Belum Cukup, mode window, diimputasi / filter VoIP, Tor, sesi minimum, NaN/inf/negatif, duplikat), `lama + baru = total`, dan 10 baris contoh. Total minimal `retrain.min_rows` (30); di bawah `retrain.warn_rows` (100) diberi peringatan.
+5. Centang konfirmasi lalu **Latih Ulang Model** (progress bar grid search). Hasil: tabel **model aktif vs model baru** (jumlah data, klaster, noise, Silhouette, DBI, CHI, DBCV, ARI) dan tabel **pemetaan klaster lama → baru** (centroid lama diproyeksikan ke ruang fitur baru, lalu klaster baru terdekat).
+6. Bila puas, klik **Aktifkan model ini**. Model aktif dan versi lama tidak pernah ditimpa sebelum itu.
+
+Aturan: duplikat tidak dihitung dua kali (dalam berkas, antar-berkas, dan terhadap data lama pada mode Tambah). Panggilan dipakai satu baris per panggilan (nilai kumulatif akhir; `delay_ms`/`jitter_ms` dikembalikan ke µs); baris Sinyal SIP, Data Belum Cukup, mode window (kolom `catatan` terisi), dan diimputasi dibuang. Untuk data kecil, grid HDBSCAN dikecilkan otomatis (nilai > n/2 dibuang; K-Means `k_max = min(config, n-1)`); bila tidak ada kandidat yang lolos aturan seleksi, parameter tetap dipakai dan ada peringatan jelas.
+
+CLI (fungsi yang sama): `python scripts/train.py --upload <file...> --mode tambah|ganti [--activate]`. Versi yang dibuat sebelum fitur ini belum punya `data_latih.csv`; buat dulu tanpa refit dengan `python scripts/backfill_data_latih.py` (default: versi aktif, sumber `Darknet.CSV`). `train_meta.json` mencatat `data_latih`: mode (awal/tambah/ganti), versi induk, jumlah baris lama/baru/total, dan daftar berkas sumber.
 
 ## Riwayat dan ekspor
 
@@ -204,7 +220,7 @@ python -m playwright install chromium
 python scripts/take_screenshots.py [--pcap data/sample_pcap/<berkas>.pcap] [--speed 3]
 ```
 
-Berkas: `01_home`, `02_dashboard_replay`, `02b_toast_panggilan_selesai`, `02c_dashboard_panggilan_selesai`, `03_analisis_klaster`, `03c_perbandingan_hdbscan_kmeans`, `03d_grid_hdbscan`, `03e_centroid_batas_jarak`, `03b_analisis_klaster_skala_log`, `04_pengaturan`, `04b_pengaturan_perbarui_deskripsi_latih_ulang`, `05_rekomendasi_ekspor`, `05b_rekomendasi_riwayat_laporan_sesi`, `05c_rekomendasi_panggilan_per_sesi`. Tabel riwayat pada tangkapan memuat semua sesi yang ada di `reports/riwayat/`; kosongkan atau pindahkan folder itu lebih dulu bila ingin riwayat yang bersih.
+Berkas: `01_home`, `02_dashboard_replay`, `02b_toast_panggilan_selesai`, `02c_dashboard_panggilan_selesai`, `03_analisis_klaster`, `03c_perbandingan_hdbscan_kmeans`, `03d_grid_hdbscan`, `03e_centroid_batas_jarak`, `03b_analisis_klaster_skala_log`, `04_pengaturan`, `04b_pengaturan_perbarui_deskripsi_latih_ulang`, `04c_pengaturan_unggah_pratinjau`, `04d_pengaturan_hasil_latih_ulang`, `05_rekomendasi_ekspor`, `05b_rekomendasi_riwayat_laporan_sesi`, `05c_rekomendasi_panggilan_per_sesi`. Tabel riwayat pada tangkapan memuat semua sesi yang ada di `reports/riwayat/`; kosongkan atau pindahkan folder itu lebih dulu bila ingin riwayat yang bersih.
 
 ## Pengujian
 
@@ -233,7 +249,7 @@ pytest tests/test_profile.py # uji Lampiran 5 (statistik, box plot, FAI, noise r
 │   ├── config.py
 │   ├── data/          loader.py (muat CSV, filter VoIP)  eda.py
 │   ├── features/      extract.py (delay/jitter/FAI)  preprocess.py (cleaning, imputasi, scaler, fitur)
-│   ├── model/         train.py  evaluate.py  assignment.py (centroid, batas, penugasan)  retrain.py  versions.py
+│   ├── model/         train.py  dataset.py (unggah CSV, filter, Tambah/Ganti)  evaluate.py  assignment.py (centroid, batas, penugasan)  retrain.py  versions.py
 │   ├── profiling/     profile.py (statistik, box plot, centroid)  describe.py (deskripsi posisi ITU)
 │   ├── analysis/      analisis klasterisasi Tahap 1 (laporan cluster_analysis.md)
 │   ├── capture/       flow_table.py  sniffer.py (replay, scapy, pyshark)  demo.py (PCAP sintetis)

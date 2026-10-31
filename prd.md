@@ -2,6 +2,7 @@ Versi 1.0 · 12 Oktober 2026 · Pemilik: Hizkia Rahuel Anglie (535230073), Tekni
 
 Catatan perubahan 27 Okt 2026 (revisi dosen, Tahap 2): aplikasi diubah menjadi KLASTERISASI MURNI. Keluaran akhir = "paling dekat ke Klaster N" berdasarkan jarak Euclidean ke centroid, BUKAN label QoS Baik/Cukup/Buruk/Anomali. Data latih = 247 flow (VOIP, tanpa Tor, fwd ≥ 5, bwd ≥ 5); algoritma utama HDBSCAN (min_cluster_size=3, min_samples=8, dipilih dengan aturan hdbscan.selection: noise ≤ 20%, klaster ≥ 2, ARI bootstrap ≥ 0,90, DBCV tertinggi); pembanding K-Means (k = jumlah klaster HDBSCAN dan k optimal). Ambang ITU tetap ada tetapi hanya untuk deskripsi klaster, garis referensi grafik, dan saran. Dasar keputusan: reports/experiments/cluster_analysis.md bagian F dan G. Bagian PRD di bawah yang menyebut label QoS, approximate_predict, Kritis, atau Terapkan Ulang Pelabelan digantikan oleh catatan ini dan bagian bertanda (T2).
 
+Catatan perubahan 1 Nov 2026 (revisi dosen, Tahap 3): fitur latih ulang diganti menjadi UPLOAD CSV dengan dua mode, Tambah dan Ganti (lihat FR-RTR). Sumber latih ulang lama (CSV data.raw_dir dan log jendela monitoring, retrain.log_source, scripts/train.py --source) dihapus. Setiap versi artefak menyimpan data_latih.csv (seluruh baris latih).
 
 1. Ringkasan
 
@@ -23,7 +24,7 @@ UC-02 Start / Stop Monitoring
 UC-03 Melihat ringkasan label dan sebaran klaster real-time
 UC-04 Meninjau evaluasi dan profil klaster (skor, tabel, box plot)
 UC-05 Mengatur parameter HDBSCAN dan ambang ITU
-UC-06 Melatih ulang model (manual atau terjadwal, di luar sesi aktif)
+UC-06 Melatih ulang model dengan mengunggah CSV (mode Tambah atau Ganti, di luar sesi aktif)
 UC-07 Melihat rekomendasi mitigasi
 UC-08 Meninjau riwayat sesi dan mengekspor laporan CSV/PDF
 3. Ruang Lingkup
@@ -153,7 +154,7 @@ TR-2 Grid search otomatis (hdbscan.grid_search: min_cluster_size × min_samples)
 TR-3 Evaluasi tersimpan (cluster_profile.json: evaluation dan comparison): Silhouette (sample_size=10000), Davies-Bouldin, Calinski-Harabasz, DBCV (hdbscan.validity; di atas evaluation.dbcv_max_points dihitung pada subsampel), Noise Ratio, ARI bootstrap mean ± sd, waktu fit. Dihitung untuk HDBSCAN (tanpa noise dan noise di-assign ke centroid terdekat) serta K-Means k = jumlah klaster HDBSCAN dan K-Means k optimal (rata-rata peringkat Silhouette dan DBI pada k_min..k_max; kurva Elbow/Silhouette/DBI/CHI disimpan di kmeans_sweep). Interpretasi Silhouette: >0,70 Strong Structure; 0,51–0,70 Reasonable; 0,26–0,50 Weak; ≤0,25 No Substantial Structure. Noise Ratio: 1–10% ideal, >20% terlalu ketat.
 TR-4 PCA 2D fit pada data latih ter-skala → pca.joblib; simpan sampel ≤5000 titik latih (pc1, pc2, cluster_id, jarak_terdekat, di_luar_klaster, klaster_kmeans_n, klaster_kmeans_opt) untuk latar scatter.
 TR-5 Versioning: setiap pelatihan membuat artifacts/<YYYYMMDD_HHMMSS>/; current.txt menunjuk versi aktif. Pelatihan ulang ditolak selama monitoring aktif. Latih ulang TIDAK PERNAH menimpa artefak lama dan tidak mengubah current.txt; versi baru aktif hanya jika pengguna memilih "Aktifkan model ini" (atau --activate di CLI). Versi lama (pelabelan QoS: cluster_profile.json tanpa schema "klaster_murni") ditolak saat aktivasi dan saat dimuat dengan pesan jelas; daftar versi menandainya kompatibel = False.
-TR-6 CLI: python scripts/train.py --config config/default_config.yaml [--source csv|log] [--data path] [--no-grid] [--activate]. Sumber data latih ulang: CSV Darknet/CIC ATAU log jendela hasil monitoring.
+TR-6 CLI: pelatihan awal python scripts/train.py --config config/default_config.yaml [--data path] [--no-grid] [--activate]; latih ulang python scripts/train.py --upload <file...> --mode tambah|ganti [--activate] (fungsi yang sama dengan UI; lihat FR-RTR). Opsi --source dihapus.
 FR-PRF Profil Klaster (klaster 1..k dan Noise, satuan asli)
 Untuk delay_ms, jitter_ms, fai_pct: mean, median, std (ddof=1), min, max; box plot (Q1, median, Q3 via np.percentile linear, IQR, pagar 1,5·IQR, whisker, pencilan maks 500). Statistik tambahan (statistik_tambahan): mean delay, P99,9 jitter, PLR klaster = Σ max(fwd−bwd,0)/Σ fwd × 100 (deskriptif; bukan dasar klasterisasi).
 Karakter klaster (karakter): median total paket (fwd+bwd), median durasi flow (detik), % UDP/TCP/lain; dipakai di deskripsi ringkas ("Klaster 2 · 32 paket · 90 dtk · Delay >400 · Jitter >50 · Loss ≤1"), tabel profil, kartu dan banner dashboard. Profil lama tanpa karakter dilengkapi dari training_sample.csv saat Perbarui Deskripsi Klaster (tanpa refit).
@@ -164,7 +165,13 @@ Mengubah ambang ITU hanya memicu "Perbarui Deskripsi Klaster" (statistik tersimp
 FR-ASG Penugasan Euclidean (T2)
 Centroid = rata-rata anggota klaster di ruang ter-skala (assignment.json: hdbscan.centroid; kmeans_n dan kmeans_opt untuk pembanding). Klaster terdekat = jarak Euclidean minimum. Batas "di luar klaster" (assignment.limit_rule, default max_cluster_global = aturan (c) analisis G): per klaster max(p95 jarak klaster ke centroid sendiri, p95 global seluruh titik non-noise); aturan lain: per_cluster, global. Titik ditandai di luar klaster bila jaraknya ke SETIAP centroid melebihi batas klaster tersebut; klaster terdekat tetap dilaporkan. Pada 247 flow: batas global 0,443; batas per klaster K1 0,443, K2 0,443, K3 0,443, K4 0,788, K5 0,569.
 
-Sumber latih ulang `log` (M8): log jendela monitoring reports/riwayat/jendela_*.csv, dengan aturan retrain.log_source: baris status "Data Belum Cukup" dan "Sinyal SIP" WAJIB dikecualikan (exclude_insufficient harus true), baris di luar klaster dikecualikan bila exclude_outside_cluster = true (default), satu baris per flow (jendela terakhir) bila per_flow = last, lalu filter sesi minimum pelatihan (data.min_session). Baris diimputasi dikecualikan (exclude_imputed) dan hanya feature_mode sesuai retrain.log_source.feature_mode (default cumulative) yang dipakai; CSV lama tanpa kolom feature_mode/diimputasi dianggap tidak diketahui. Log format lama (kolom label) tetap terbaca untuk status. min_rows (default 200) dicek SEBELUM pelatihan. delay_ms dan jitter_ms pada log dikonversi kembali ke µs (× 1000).
+FR-RTR Latih ulang dari unggahan CSV (T3, 1 Nov 2026; qos.model.dataset dan qos.model.retrain)
+RTR-1 Data latih per versi: setiap versi menyimpan data_latih.csv berisi SELURUH baris latih (bukan sampel) dengan kolom kanonik iat_mean_us, iat_std_us, fwd_packets_count, bwd_packets_count, duration_us, protocol, sumber (nama berkas asal), id_baris (unik), waktu_ditambahkan. train_meta.json mencatat data_latih: mode (awal | tambah | ganti), versi_induk, jumlah_baris_lama (yang dipakai; 0 pada Ganti), jumlah_baris_baru, jumlah_total, jumlah_baris_lama_dibuang (Ganti), file_sumber. Untuk versi yang dibuat sebelum fitur ini: python scripts/backfill_data_latih.py [--version V] [--sumber Darknet.CSV] membuat data_latih.csv dari training_sample.csv TANPA refit (ditolak bila sampel bukan seluruh data latih); model aktif 20261027_010848 dibuat dengan cara ini (247 flow, sumber Darknet.CSV).
+RTR-2 Unggah dan deteksi format: satu atau beberapa CSV. (a) panggilan_<id_sesi>.csv (kolom wajib flow_id, durasi_s, total_fwd, total_bwd, delay_ms, jitter_ms, status_akhir); (b) CSV flow format darknet/cic/bccc menurut data.column_map. Format lain ditolak dengan pesan yang menyebut kolom yang kurang; berkas yang ditolak menghalangi latih ulang.
+RTR-3 Filter per tahap (jumlah baris per tahap dilaporkan per berkas). (a) buang Sinyal SIP, Data Belum Cukup, baris mode window (catatan terisi), baris diimputasi (bila kolomnya ada); satu baris per panggilan (nilai kumulatif akhir); delay_ms/jitter_ms × 1000 kembali ke µs, duration_us = durasi_s × 10^6, protocol dari bagian akhir flow_id. (b) filter VOIP dan data.exclude_traffic_types seperti pelatihan awal. Semua sumber: data.min_session, buang NaN/inf/negatif, buang duplikat (kunci = 6 kolom numerik dibulatkan 6 desimal; dalam berkas, antar-berkas, dan terhadap data lama pada Tambah).
+RTR-4 Mode: Tambah = data_latih.csv versi AKTIF + data baru yang lolos; Ganti = hanya data baru. Total minimum retrain.min_rows (default 30), di bawahnya ditolak; peringatan bila < retrain.warn_rows (default 100). Grid HDBSCAN disesuaikan dengan ukuran data n: nilai min_cluster_size atau min_samples > n/2 dibuang; K-Means k_max = min(config, n-1). Bila tidak ada kandidat yang lolos aturan seleksi (atau semua kombinasi terbuang), dipakai parameter tetap (dipangkas ke n/2 bila perlu) dengan peringatan, dicatat di train_meta.json (peringatan) dan ditampilkan di UI/CLI.
+RTR-5 Hasil: tabel perbandingan model aktif vs model baru (jumlah data, jumlah klaster, noise, Silhouette, DBI, CHI, DBCV, ARI) dan tabel pemetaan klaster lama → baru (centroid_asli klaster lama dikonversi ke µs/fitur, log1p, scaler BARU, lalu klaster baru terdekat menurut Euclidean; kolom jarak dan deskripsi). Versi baru tidak aktif sampai "Aktifkan model ini". Versi lama tidak pernah ditimpa; ditolak saat monitoring aktif.
+Catatan data lama: panggilan_*.csv format lama (label QoS, tanpa status_akhir) ditolak karena kolom kurang.
 FR-MON Akuisisi & Inferensi Real-Time
 MON-1 Backend: scapy AsyncSniffer (default sejak 19 Okt 2026), pyshark LiveCapture (opsi, butuh tshark), replay (baca .pcap/.pcapng dengan timing asli × replay_speed)
 MON-2 BPF filter dari config. Default (19 Okt 2026) membuang port 443 (QUIC), 53 (DNS), 123 (NTP), 5353 (mDNS), dan 1900 (SSDP) karena trafik tersebut di luar distribusi latih (VoIP) dan hanya menghasilkan label Anomali yang menyesatkan pada uji live pertama; daftar interface via tshark -D / psutil
@@ -212,7 +219,7 @@ Kartu Silhouette (+ interpretasi), DBI, CHI, DBCV, Noise Ratio, ARI bootstrap; t
 P3 Pengaturan Parameter
 
 Slider min_cluster_size 2–50 (default 3), min_samples 1–20 (default 8), toggle grid search; aturan seleksi (noise maks, klaster minimum, ARI minimum); aturan batas jarak (aturan, persentil); ambang ITU (hanya deskripsi/referensi/saran)
-Tombol Save Configuration, Reset to Default, Perbarui Deskripsi Klaster (tanpa refit), Latih Ulang Model (disabled saat monitoring dan sebelum checkbox "Saya mengerti ini membuat versi model baru" dicentang; progress bar; setelah selesai tampilkan skor + tombol "Aktifkan model ini"), daftar versi dengan kolom kompatibel
+Tombol Save Configuration, Reset to Default, Perbarui Deskripsi Klaster (tanpa refit), Latih Ulang Model (T3: uploader CSV multi-file, radio "Tambah ke data latih" / "Ganti data latih", pratinjau format + baris per tahap + lama + baru = total + 10 baris contoh, checkbox "Saya mengerti ini membuat versi model baru", tombol dengan progress bar; hasil: tabel perbandingan aktif vs baru, pemetaan klaster lama → baru, tombol "Aktifkan model ini"; tombol "Unduh data latih model aktif (CSV)"; semua tombol dan uploader nonaktif selama monitoring), daftar versi dengan kolom kompatibel
 
 P4 Saran berdasarkan karakteristik klaster & Ekspor Laporan
 
@@ -222,7 +229,7 @@ Unduh laporan per sesi: CSV (jendela, panggilan) dan PDF ringkasan
 10. Artefak & Output
 10.1 artifacts/<versi>/ (T2)
 
-hdbscan_model.joblib, kmeans_n.joblib (k = jumlah klaster HDBSCAN), kmeans_opt.joblib (k optimal), scaler.joblib, pca.joblib, assignment.json (centroid ter-skala HDBSCAN dan K-Means, batas per klaster, batas global, aturan, persentil), cluster_profile.json (schema "klaster_murni", evaluation, comparison, kmeans_sweep, clusters), train_meta.json (parameter, aturan seleksi, ambang, median imputasi, jumlah baris, filter VoIP, timestamp), grid_results.csv (dengan ARI), training_sample.csv
+hdbscan_model.joblib, kmeans_n.joblib (k = jumlah klaster HDBSCAN), kmeans_opt.joblib (k optimal), scaler.joblib, pca.joblib, assignment.json (centroid ter-skala HDBSCAN dan K-Means, batas per klaster, batas global, aturan, persentil), cluster_profile.json (schema "klaster_murni", evaluation, comparison, kmeans_sweep, clusters), train_meta.json (parameter, aturan seleksi, ambang, median imputasi, jumlah baris, filter VoIP, timestamp), grid_results.csv (dengan ARI), training_sample.csv, data_latih.csv (RTR-1; opsional untuk versi lama)
 
 10.2 cluster_profile.json (ringkas)
 json
@@ -313,13 +320,8 @@ profiling:
   jitter_percentile: 99.9
   max_outliers: 500
 retrain:
-  log_source:
-    exclude_insufficient: true
-    exclude_outside_cluster: true
-    per_flow: last
-    exclude_imputed: true
-    feature_mode: cumulative
-    min_rows: 200
+  min_rows: 30      # total baris latih minimum; di bawahnya ditolak
+  warn_rows: 100    # di bawahnya dilatih tetapi diberi peringatan
 thresholds:
   delay_good_ms: 150.0
   delay_max_ms: 400.0
@@ -413,3 +415,4 @@ min_cluster_size kecil pada data besar → klaster sangat banyak; andalkan grid 
 Silhouette O(n²) → wajib sample_size
 Live capture butuh hak Administrator/root dan tshark/Npcap
 M10 (T2, 27 Okt 2026) Klasterisasi murni: N1 training/artefak, N2 inferensi Euclidean + CSV baru, N3 UI, N4 dokumentasi dan tangkapan layar
+M11 (T3, 1 Nov 2026) Latih ulang dari unggahan CSV: data_latih.csv per versi, mode Tambah/Ganti, grid adaptif, UI Pengaturan, CLI --upload, tangkapan layar 04c/04d

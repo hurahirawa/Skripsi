@@ -296,10 +296,13 @@ def _btn(at, label):
     return next(b for b in at.button if b.label == label)
 
 
-def _log_csv(cfg, name="uiuji", n=300):
-    from tests.test_m8 import log_rows, write_log
+def _upload_csv(tmp, name="panggilan_ui.csv", n=40, seed=21, kind="panggilan"):
+    """CSV unggahan (panggilan atau darknet) dari flow sintetis; kembalikan tuple untuk FileUploader.set_value."""
+    from tests.test_dataset import flows_to_darknet, flows_to_panggilan, new_flows
 
-    return write_log(cfg, name, log_rows(n))
+    write = flows_to_panggilan if kind == "panggilan" else flows_to_darknet
+    path = write(new_flows(seed, n=n), Path(tmp) / name)
+    return (name, path.read_bytes(), "text/csv")
 
 
 @pytest.fixture
@@ -332,35 +335,66 @@ def test_ui_perbarui_deskripsi_klaster_membuat_versi_tanpa_mengaktifkan(restore_
     assert current.read_text("utf-8") == res["version"]
 
 
-def test_ui_latih_ulang_dari_log_tidak_mengaktifkan(restore_active):
-    cfg, conf = restore_active
-    (conf.parent / "user_config.yaml").write_text(yaml.safe_dump({"retrain": {"log_source": {"min_rows": 100}}}), encoding="utf-8")
-    _log_csv(cfg)
+def _preview_frames(at):
+    return [df.value for df in at.dataframe]
+
+
+def test_ui_tanpa_sumber_log_dan_tombol_nonaktif_tanpa_unggahan(restore_active):
+    at = run("pages/3_Pengaturan_Parameter.py")
+    assert not [r for r in at.radio if r.key == "retrain_source"]  # pilihan sumber lama dihapus
+    assert [r.options for r in at.radio if r.key == "retrain_mode"] == [["Tambah ke data latih", "Ganti data latih"]]
+    assert at.file_uploader(key="retrain_files").accept_multiple_files
+    assert _btn(at, "Latih Ulang Model").disabled
+    assert not [d for d in _preview_frames(at) if "klaster_baru" in d.columns]
+
+
+def test_ui_unggah_pratinjau_latih_dan_aktifkan(restore_active, tmp_path):
+    cfg, _ = restore_active
     current = Path(cfg["paths"]["artifacts_dir"]) / "current.txt"
     active = current.read_text("utf-8")
     at = run("pages/3_Pengaturan_Parameter.py")
-    at.radio(key="retrain_source").set_value("Log monitoring (reports/riwayat)").run()
-    assert any("mencukupi" in s.value for s in at.success)
-    assert _btn(at, "Latih Ulang Model").disabled  # butuh konfirmasi dulu
+    at.file_uploader(key="retrain_files").set_value([_upload_csv(tmp_path)]).run()
+    assert not at.exception, [e.value for e in at.exception]
+    stages = next(d for d in _preview_frames(at) if "berkas" in d.columns)
+    assert stages.loc[0, "format"] == "panggilan" and stages.loc[0, "setelah buang duplikat"] == 120
+    metrics = {m.label: m.value for m in at.metric}
+    assert (metrics["Data lama dipakai"], metrics["Data baru lolos"], metrics["Total data latih"]) == ("240", "120", "360")
+    assert _btn(at, "Latih Ulang Model").disabled  # butuh konfirmasi
     at.checkbox(key="confirm_retrain").check().run()
     _btn(at, "Latih Ulang Model").click().run()
     assert not at.exception, [e.value for e in at.exception]
     res = at.session_state["retrain_result"]
-    assert res["version"] != active and current.read_text("utf-8") == active
-    assert any(m.label == "Silhouette" for m in at.metric) and any(m.label == "DBCV" for m in at.metric)
-    assert res["version"] in list(__import__("qos.model.versions", fromlist=["x"]).list_versions(cfg)["versi"])
+    assert res["version"] != active and current.read_text("utf-8") == active  # belum aktif
+    frames = _preview_frames(at)
+    assert any("metrik" in d.columns for d in frames)          # tabel perbandingan aktif vs baru
+    assert any("klaster_baru" in d.columns for d in frames)    # pemetaan klaster lama -> baru
+    _btn(at, "Aktifkan model ini").click().run()
+    assert current.read_text("utf-8") == res["version"]
 
 
-def test_ui_log_tidak_cukup_menonaktifkan_latih_ulang(restore_active):
-    cfg, _ = restore_active
-    _log_csv(cfg, n=30)  # < min_rows default 200
+def test_ui_mode_ganti_hanya_data_baru(restore_active, tmp_path):
     at = run("pages/3_Pengaturan_Parameter.py")
-    at.radio(key="retrain_source").set_value("Log monitoring (reports/riwayat)").run()
-    assert any("Data log tidak cukup" in w.value for w in at.warning)
+    at.file_uploader(key="retrain_files").set_value([_upload_csv(tmp_path, "d.csv", kind="darknet")])
+    at.radio(key="retrain_mode").set_value("Ganti data latih").run()
+    metrics = {m.label: m.value for m in at.metric}
+    assert (metrics["Data lama dipakai"], metrics["Total data latih"]) == ("0", "120")
+
+
+def test_ui_format_salah_dan_data_kurang_menonaktifkan_latih(restore_active, tmp_path):
+    at = run("pages/3_Pengaturan_Parameter.py")
+    bad = ("salah.csv", b"a,b\n1,2\n", "text/csv")
+    at.file_uploader(key="retrain_files").set_value([bad]).run()
+    assert any("salah.csv" in e.value and "tidak dikenali" in e.value for e in at.error)
+    at.checkbox(key="confirm_retrain").check().run()
+    assert _btn(at, "Latih Ulang Model").disabled
+    tiny = _upload_csv(tmp_path, "kecil.csv", n=4, kind="darknet")  # 12 baris + 0 lama (Ganti) < min_rows
+    at.file_uploader(key="retrain_files").set_value([tiny])
+    at.radio(key="retrain_mode").set_value("Ganti data latih").run()
+    assert any("retrain.min_rows" in e.value for e in at.error)
     assert _btn(at, "Latih Ulang Model").disabled
 
 
-def test_ui_latih_ulang_dan_aktivasi_dinonaktifkan_saat_monitoring(restore_active):
+def test_ui_latih_ulang_dan_tombol_dinonaktifkan_saat_monitoring(restore_active, tmp_path):
     from types import SimpleNamespace
 
     at = AppTest.from_file(str(APP / "pages/3_Pengaturan_Parameter.py"), default_timeout=60)
@@ -368,6 +402,7 @@ def test_ui_latih_ulang_dan_aktivasi_dinonaktifkan_saat_monitoring(restore_activ
     at.run()
     assert not at.exception, [e.value for e in at.exception]
     assert _btn(at, "Latih Ulang Model").disabled
+    assert at.file_uploader(key="retrain_files").proto.disabled
     assert any("Monitoring sedang berjalan" in w.value for w in at.warning)
 
 
@@ -422,9 +457,10 @@ def test_ui_aktivasi_versi_lama_ditolak_dan_ditandai_tidak_kompatibel(restore_ac
         shutil.rmtree(legacy, ignore_errors=True)
 
 
-def test_ui_latih_ulang_butuh_konfirmasi(restore_active):
+def test_ui_latih_ulang_butuh_konfirmasi(restore_active, tmp_path):
     at = run("pages/3_Pengaturan_Parameter.py")
     assert at.checkbox(key="confirm_retrain").label == "Saya mengerti ini membuat versi model baru"
-    assert _btn(at, "Latih Ulang Model").disabled
+    at.file_uploader(key="retrain_files").set_value([_upload_csv(tmp_path)]).run()
+    assert _btn(at, "Latih Ulang Model").disabled  # data siap, tetapi belum dikonfirmasi
     at.checkbox(key="confirm_retrain").check().run()
     assert not _btn(at, "Latih Ulang Model").disabled

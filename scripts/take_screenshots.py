@@ -27,6 +27,7 @@ MIN_HEIGHT = 760
 RENDER_WAIT_MS = 2500  # beri waktu Plotly selesai menggambar
 SERVER_TIMEOUT_SEC = 60
 REPLAY_FINISH_TIMEOUT_MS = 90_000
+TRAIN_TIMEOUT_MS = 600_000
 
 
 def wait_for_server(port: int) -> None:
@@ -64,11 +65,12 @@ def shot(page: Page, out: Path, name: str) -> Path:
     return path
 
 
-def shot_section(page: Page, out: Path, name: str, heading: str, height: int = 1250) -> Path:
+def shot_section(page: Page, out: Path, name: str, heading: str, height: int = 1250, by_text: bool = False) -> Path:
     """Tangkapan satu bagian halaman: gulir ke `heading` lalu simpan satu layar penuh (untuk halaman yang panjang)."""
     page.set_viewport_size({"width": VIEWPORT["width"], "height": height})
     page.wait_for_timeout(500)
-    page.get_by_role("heading", name=heading).first.evaluate("e => e.scrollIntoView()")
+    target = page.get_by_text(heading).first if by_text else page.get_by_role("heading", name=heading).first
+    target.evaluate("e => e.scrollIntoView()")
     page.wait_for_timeout(RENDER_WAIT_MS)
     path = out / name
     page.screenshot(path=str(path))
@@ -80,6 +82,20 @@ def go(page: Page, link: str, heading: str) -> None:
     """Pindah halaman lewat navigasi sidebar (menjaga st.session_state sesi) dan tunggu judulnya."""
     page.get_by_role("link", name=link).first.click()
     page.get_by_role("heading", name=heading).first.wait_for()
+
+
+def sample_upload(cfg: dict) -> Path:
+    """CSV contoh unggahan: gabungan panggilan_*.csv format terbaru di reports/riwayat (hasil monitoring nyata/replay)."""
+    import pandas as pd
+
+    folder = resolve_path(cfg["paths"]["reports_dir"])
+    files = [f for f in (folder / "riwayat").glob("panggilan_*.csv") if "status_akhir" in f.read_text("utf-8").splitlines()[0]]
+    if not files:
+        raise SystemExit("Tidak ada panggilan_*.csv format terbaru untuk contoh unggahan; jalankan monitoring dulu.")
+    out = folder / "contoh_unggah" / "panggilan_contoh.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pd.concat([pd.read_csv(f) for f in files], ignore_index=True).to_csv(out, index=False)
+    return out
 
 
 def main() -> None:
@@ -145,6 +161,16 @@ def main() -> None:
             go(page, "Pengaturan Parameter", "Pengaturan Parameter")
             shot(page, out, "04_pengaturan.png")
             shot_section(page, out, "04b_pengaturan_perbarui_deskripsi_latih_ulang.png", "Perbarui Deskripsi Klaster")
+
+            # Latih ulang: unggah contoh panggilan_*.csv (hasil monitoring nyata), pratinjau, latih, lihat perbandingan
+            page.locator('input[type="file"][accept*=".csv"]').set_input_files(str(sample_upload(cfg)))
+            page.get_by_text("Pratinjau").wait_for(timeout=30_000)
+            page.wait_for_timeout(1500)
+            shot_section(page, out, "04c_pengaturan_unggah_pratinjau.png", "Latih Ulang Model", height=1900)
+            page.get_by_text("Saya mengerti ini membuat versi model baru").click()
+            page.get_by_role("button", name="Latih Ulang Model").click()
+            page.get_by_text("Model aktif vs model baru").wait_for(timeout=TRAIN_TIMEOUT_MS)
+            shot_section(page, out, "04d_pengaturan_hasil_latih_ulang.png", "Model aktif vs model baru", height=1500, by_text=True)
 
             go(page, "Rekomendasi Ekspor", "Ekspor Laporan dan Saran Klaster")
             page.get_by_role("button", name="Buat PDF ringkasan").click()

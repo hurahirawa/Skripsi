@@ -53,14 +53,9 @@ data:
     rtp_port_ranges: [[10000, 20000], [16384, 32767]]
     min_flows_warning: 200
     fallback_udp_all: false
-retrain:
-  log_source:               # sumber latih ulang = log jendela monitoring (reports/riwayat/jendela_*.csv)
-    exclude_insufficient: true   # WAJIB true: baris "Data Belum Cukup" tidak punya fitur valid
-    exclude_outside_cluster: true   # buang baris di luar klaster (di_luar_klaster = true) agar pelatihan tidak tercemar pencilan
-    per_flow: last               # last = satu baris per flow (jendela terakhir) | all = semua jendela
-    exclude_imputed: true        # buang baris diimputasi = true (fitur memakai median imputasi)
-    feature_mode: cumulative     # hanya baris dengan mode ini; CSV lama tanpa kolom feature_mode = tidak diketahui → dibuang; null = semua mode
-    min_rows: 200                # jumlah minimum baris setelah pengecualian; di bawah ini latih ulang ditolak
+retrain:                   # latih ulang = unggah CSV (mode Tambah / Ganti), lihat qos.model.dataset
+  min_rows: 30               # total baris latih minimum; di bawah ini latih ulang ditolak
+  warn_rows: 100             # di bawah ini hasil tetap dilatih tetapi diberi peringatan
 experiments:             # varian fitur untuk scripts/compare_variants.py (tidak mengubah model aktif)
   feature_variants:
     A:

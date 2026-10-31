@@ -15,7 +15,7 @@ from qos.model.train import ARTIFACT_FILES, CURRENT_FILE, SCHEMA, _jsonable, all
 from qos.profiling.profile import characteristics, redescribe
 
 LEGACY_REQUIRED: tuple[str, ...] = ("hdbscan_model.joblib", "scaler.joblib", "pca.joblib", "cluster_profile.json", "train_meta.json")
-REQUIRED_FILES: tuple[str, ...] = tuple(n for n in ARTIFACT_FILES if n not in ("grid_results.csv", "training_sample.csv"))
+REQUIRED_FILES: tuple[str, ...] = tuple(n for n in ARTIFACT_FILES if n not in ("grid_results.csv", "training_sample.csv", "data_latih.csv"))
 COPY_FILES: tuple[str, ...] = tuple(n for n in ARTIFACT_FILES if n not in ("cluster_profile.json", "train_meta.json"))
 THRESHOLD_KEYS: tuple[str, ...] = ("delay_good_ms", "delay_max_ms", "jitter_max_ms", "loss_good_pct", "loss_max_pct")
 LEGACY_MESSAGE = (

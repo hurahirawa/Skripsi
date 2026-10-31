@@ -23,6 +23,7 @@ from qos.config import resolve_path
 from qos.data.loader import filter_voip, load_flows
 from qos.features.extract import derive_metrics
 from qos.features.preprocess import apply_session_filters, build_features, clean_features, fit_scaler
+from qos.model.dataset import DATA_FILE, data_info, ensure_canonical
 from qos.model.assignment import RULE_TEXT, assign, centroids_of, distance_limits
 from qos.model.evaluate import evaluate_clustering, silhouette_label
 from qos.profiling.profile import build_cluster_profile
@@ -45,6 +46,7 @@ ARTIFACT_FILES: tuple[str, ...] = (
     "train_meta.json",
     "grid_results.csv",
     "training_sample.csv",
+    "data_latih.csv",
 )
 SELECTION_RULE = (
     "Kandidat valid = noise <= batas, klaster >= minimum, ARI bootstrap rata-rata >= minimum; "
@@ -76,6 +78,12 @@ def select_final(grid: pd.DataFrame, sel: dict[str, Any]) -> tuple[pd.Series | N
     return (None if ok.empty else ok.iloc[0]), ok
 
 
+def adaptive_grid(grid: dict[str, Any], n: int) -> tuple[list[int], list[int]]:
+    """Daftar min_cluster_size dan min_samples yang dipakai untuk data berukuran `n`: nilai > n/2 dibuang."""
+    limit = n / 2
+    return [v for v in grid["min_cluster_size"] if v <= limit], [v for v in grid["min_samples"] if v <= limit]
+
+
 def grid_search(X: np.ndarray, cfg: dict[str, Any], progress: Callable[[int, int], None] | None = None) -> pd.DataFrame:
     """Grid min_cluster_size × min_samples dengan metrik dan ARI bootstrap tiap kandidat; kolom `valid` menurut aturan seleksi.
 
@@ -83,7 +91,7 @@ def grid_search(X: np.ndarray, cfg: dict[str, Any], progress: Callable[[int, int
     """
     h, rs, ev_cfg = cfg["hdbscan"], cfg["data"]["random_state"], cfg["evaluation"]
     grid, st, sel, method = h["grid_search"], h["stability"], h["selection"], h["cluster_selection_method"]
-    combos = list(itertools.product(grid["min_cluster_size"], grid["min_samples"]))
+    combos = list(itertools.product(*adaptive_grid(grid, len(X))))
     rows = []
     for i, (mcs, ms) in enumerate(combos, start=1):
         labels = fit_hdbscan(X, mcs, ms, method, prediction_data=False).labels_
@@ -95,6 +103,8 @@ def grid_search(X: np.ndarray, cfg: dict[str, Any], progress: Callable[[int, int
         rows.append({"min_cluster_size": mcs, "min_samples": ms, **ev, "ari_mean": mean, "ari_sd": sd})
         if progress is not None:
             progress(i, len(combos))
+    if not rows:
+        return pd.DataFrame(columns=["min_cluster_size", "min_samples", "n_clusters", "noise_ratio", "silhouette", "dbcv", "ari_mean", "valid"])
     out = pd.DataFrame(rows)
     _, ok = select_final(out, sel)
     out["valid"] = out.index.isin(ok.index)
@@ -148,8 +158,12 @@ def train(
     counts: dict[str, int] | None = None,
     progress: Callable[[int, int], None] | None = None,
     source: dict[str, Any] | None = None,
+    data_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Latih model dari flow yang sudah difilter; `source` (asal data) dicatat di train_meta.json.
+    """Latih model dari flow yang sudah difilter; `source` (asal data) dan `data_meta` (mode, induk, jumlah baris) dicatat di train_meta.json.
+
+    Grid HDBSCAN disesuaikan dengan ukuran data (nilai > n/2 dibuang) dan k_max K-Means = min(config, n-1);
+    keadaan darurat (tanpa kandidat valid, parameter tetap dipangkas) dicatat di result["peringatan"].
 
     Mengembalikan semua objek hasil pelatihan (belum disimpan). Klaster bernomor 1..k (urut ukuran menurun), noise -1.
     """
@@ -161,21 +175,38 @@ def train(
 
     clean, medians = clean_features(flows, base, data_cfg["max_train_rows"], rs)
     clean = derive_metrics(clean, feat["delay_column"], feat["jitter_column"], feat["fai_clip_negative"])
+    data_latih = ensure_canonical(clean, sumber=(source or {}).get("sumber", "-"))  # SELURUH baris latih, bukan sampel
     features = build_features(clean, columns, log_columns)
     scaler = fit_scaler(features)
     X = scaler.transform(features)
     method = hcfg["cluster_selection_method"]
 
-    grid, fallback = None, False
+    grid, fallback, peringatan = None, False, []
     mcs, ms = hcfg["min_cluster_size"], hcfg["min_samples"]
     if use_grid:
-        grid = grid_search(X, cfg, progress)
-        best, _ = select_final(grid, hcfg["selection"])
+        full = hcfg["grid_search"]
+        lists = adaptive_grid(full, len(X))
+        n_full, n_kept = len(full["min_cluster_size"]) * len(full["min_samples"]), len(lists[0]) * len(lists[1])
+        if n_kept < n_full:
+            peringatan.append(f"Grid disesuaikan dengan ukuran data ({len(X)} baris): {n_full - n_kept} dari {n_full} kombinasi dibuang (nilai > n/2).")
+        best = None
+        if n_kept:
+            grid = grid_search(X, cfg, progress)
+            best, _ = select_final(grid, hcfg["selection"])
         if best is None:
             fallback = True
-            logger.warning("Tidak ada kandidat grid yang memenuhi aturan seleksi; memakai parameter tetap dari config")
+            peringatan.append(
+                "Tidak ada kandidat grid yang memenuhi aturan seleksi; memakai parameter tetap dari config "
+                f"(min_cluster_size={mcs}, min_samples={ms})."
+            )
         else:
             mcs, ms = int(best["min_cluster_size"]), int(best["min_samples"])
+    cap = max(2, len(X) // 2)
+    if mcs > cap or ms > cap:  # parameter tetap tak masuk akal untuk data sekecil ini
+        peringatan.append(f"Parameter tetap dipangkas ke maksimum {cap} (n/2) untuk data {len(X)} baris: {mcs}/{ms} -> {min(mcs, cap)}/{min(ms, cap)}.")
+        mcs, ms = min(mcs, cap), min(ms, cap)
+    for msg in peringatan:
+        logger.warning(msg)
 
     model = fit_hdbscan(X, mcs, ms, method)
     raw_labels = model.labels_
@@ -259,6 +290,8 @@ def train(
         "params": {"min_cluster_size": mcs, "min_samples": ms, "grid_search": bool(use_grid),
                    "grid_fallback": fallback, "aturan_seleksi": SELECTION_RULE, "k_kmeans_optimal": k_opt},
         "n_train_rows": int(len(clean)), "counts": counts or {}, "labels": labels, "source": source or {},
+        "peringatan": peringatan, "data_latih": data_latih,
+        "data_meta": data_meta or data_info("awal", None, 0, len(data_latih), list(dict.fromkeys(data_latih["sumber"]))),
     }
 
 
@@ -317,6 +350,8 @@ def save_artifacts(result: dict[str, Any], cfg: dict[str, Any], activate: bool |
         "fai_clip_negative": cfg["features"]["fai_clip_negative"],
         "random_state": cfg["data"]["random_state"],
         "sumber_data": result.get("source", {}),
+        "data_latih": result["data_meta"],
+        "peringatan": result.get("peringatan", []),
     }
     (out / "assignment.json").write_text(json.dumps(_jsonable(result["assignment"]), indent=2, ensure_ascii=False), "utf-8")
     (out / "cluster_profile.json").write_text(json.dumps(_jsonable(profile_doc), indent=2, ensure_ascii=False), "utf-8")
@@ -324,6 +359,7 @@ def save_artifacts(result: dict[str, Any], cfg: dict[str, Any], activate: bool |
     grid = result["grid"]
     (grid if grid is not None else pd.DataFrame()).to_csv(out / "grid_results.csv", index=False)
     result["sample"].to_csv(out / "training_sample.csv", index=False)
+    result["data_latih"].to_csv(out / DATA_FILE, index=False)
 
     current = root / CURRENT_FILE
     if activate or (activate is None and not current.is_file()):

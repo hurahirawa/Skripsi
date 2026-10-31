@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 RTP_INTERVAL_SEC = 0.02  # G.711, 20 ms per paket
+MAC_SRC, MAC_DST = "02:00:00:00:00:01", "02:00:00:00:00:02"  # tetap: tanpa MAC, scapy melakukan ARP ke jaringan
 RTP_PAYLOAD = b"\x80\x00" + bytes(158)
 # (ip_a, port_a, ip_b, port_b, jitter_sec, loss_prob_b_to_a)
 DEFAULT_CALLS: tuple[tuple[str, int, str, int, float, float], ...] = (
@@ -24,7 +25,7 @@ def build_packets(duration_sec: float = 30.0, seed: int = 42, t0: float = 1_700_
     packets = []
 
     def add(ts: float, src: str, sport: int, dst: str, dport: int, payload: bytes) -> None:
-        pkt = Ether() / IP(src=src, dst=dst) / UDP(sport=sport, dport=dport) / payload
+        pkt = Ether(src=MAC_SRC, dst=MAC_DST) / IP(src=src, dst=dst) / UDP(sport=sport, dport=dport) / payload
         pkt.time = ts
         packets.append(pkt)
 

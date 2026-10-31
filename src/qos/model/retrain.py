@@ -1,11 +1,13 @@
-"""Latih ulang model (PRD TR-5, TR-6, UC-06): sumber CSV CIC/Darknet atau log jendela monitoring.
+"""Latih ulang dari unggahan CSV (PRD TR-5, TR-6, UC-06): mode Tambah atau Ganti, perbandingan, dan pemetaan klaster.
 
 Latih ulang SELALU membuat versi baru dan tidak pernah menimpa artefak lama maupun current.txt;
 mengaktifkan versi baru adalah langkah terpisah (qos.model.versions.activate_version).
+Fungsi yang sama dipakai UI (halaman Pengaturan) dan CLI (scripts/train.py --upload).
 """
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -15,19 +17,19 @@ import numpy as np
 import pandas as pd
 
 from qos.config import resolve_path
-from qos.features.preprocess import session_mask
-from qos.model.train import COUNT_COLUMNS, load_training_frame, save_artifacts, train
-from qos.monitor.calls import INSUFFICIENT, SIGNALING
+from qos.features.preprocess import build_features
+from qos.model.dataset import DatasetError, Prepared, prepare_dataset
+from qos.model.train import save_artifacts, train
+from qos.model.versions import active_version
 
 logger = logging.getLogger(__name__)
 
-SOURCES: tuple[str, ...] = ("csv", "log")
-LOG_GLOB = "jendela_*.csv"
-LOG_COLUMNS: tuple[str, ...] = ("id_sesi", "flow_id", "delay_ms", "jitter_ms", "fwd", "bwd")
-OPTIONAL_LOG_COLUMNS: tuple[str, ...] = ("status", "label", "di_luar_klaster", "feature_mode", "diimputasi")  # tidak ada di CSV lama → "tidak diketahui"
-FEATURE_MODES: tuple[str, ...] = ("window", "cumulative")
-BOOL_MAP = {True: True, False: False, "True": True, "False": False, "true": True, "false": False}
 US_PER_MS = 1000.0
+COMPARE_ROWS: tuple[tuple[str, str], ...] = (
+    ("Jumlah data latih", "n_data"), ("Jumlah klaster", "n_clusters"), ("Noise Ratio", "noise_ratio"),
+    ("Silhouette", "silhouette"), ("Davies-Bouldin", "davies_bouldin"), ("Calinski-Harabasz", "chi"),
+    ("DBCV", "dbcv"), ("ARI bootstrap", "ari_mean"),
+)
 
 
 class RetrainError(RuntimeError):
@@ -35,100 +37,11 @@ class RetrainError(RuntimeError):
 
 
 class InsufficientDataError(RetrainError):
-    """Jumlah baris latih di bawah minimum."""
+    """Jumlah baris latih di bawah minimum atau tidak ada baris baru yang lolos."""
 
 
 class MonitoringActiveError(RetrainError):
     """Latih ulang ditolak selama monitoring aktif (PRD TR-5)."""
-
-
-def list_log_files(cfg: dict[str, Any]) -> list[Path]:
-    """CSV jendela hasil monitoring di <reports_dir>/riwayat."""
-    folder = resolve_path(cfg["paths"]["reports_dir"]) / "riwayat"
-    return sorted(folder.glob(LOG_GLOB)) if folder.is_dir() else []
-
-
-def load_log_frame(cfg: dict[str, Any], files: list[Path] | None = None) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Ubah log jendela monitoring menjadi tabel latih (kolom mentah iat_mean_us, iat_std_us, fwd, bwd).
-
-    Urutan: buang "Data Belum Cukup" (wajib), mode fitur selain `feature_mode` (CSV lama tanpa kolom = tidak
-    diketahui → dibuang), baris diimputasi (opsi), di luar klaster (opsi), satu baris per flow bila per_flow=last,
-    lalu filter sesi minimum pelatihan. Jumlah minimum baris (`min_rows`) dicek SEBELUM pelatihan.
-    Kembalian: (tabel latih, hitungan tiap tahap).
-    """
-    opt = cfg["retrain"]["log_source"]
-    if not opt["exclude_insufficient"]:
-        raise RetrainError(
-            "retrain.log_source.exclude_insufficient harus true: baris 'Data Belum Cukup' tidak punya fitur valid."
-        )
-    if opt["per_flow"] not in ("last", "all"):
-        raise RetrainError(f"retrain.log_source.per_flow tidak dikenal: {opt['per_flow']!r} (last | all)")
-    files = files if files is not None else list_log_files(cfg)
-    if not files:
-        raise InsufficientDataError("Tidak ada log jendela monitoring (reports/riwayat/jendela_*.csv).")
-
-    mode = opt["feature_mode"]
-    if mode is not None and mode not in FEATURE_MODES:
-        raise RetrainError(f"retrain.log_source.feature_mode tidak dikenal: {mode!r} ({list(FEATURE_MODES)} atau null)")
-    wanted = (*LOG_COLUMNS, *OPTIONAL_LOG_COLUMNS)
-    raw = pd.concat([pd.read_csv(f, usecols=lambda c: c in wanted) for f in files], ignore_index=True)
-    missing = [c for c in LOG_COLUMNS if c not in raw.columns]
-    if "status" not in raw.columns and "label" not in raw.columns:
-        missing.append("status")
-    if missing:
-        raise RetrainError(f"Log jendela tidak punya kolom {missing}")
-    if "status" not in raw.columns:  # log lama (pelabelan QoS): kolom `label` memuat status Data Belum Cukup / Sinyal SIP
-        raw["status"] = raw["label"]
-    for col in OPTIONAL_LOG_COLUMNS:  # CSV lama: kolom tidak ada → nilai tidak diketahui (NaN)
-        if col not in raw.columns:
-            raw[col] = np.nan
-    counts = {"baris_log": len(raw)}
-    df = raw[~raw["status"].isin([INSUFFICIENT, SIGNALING])]  # keduanya tanpa fitur valid
-    counts["setelah_buang_data_belum_cukup"] = len(df)
-    if mode is not None:
-        unknown = df["feature_mode"].isna()
-        other = ~unknown & (df["feature_mode"] != mode)
-        counts["dikecualikan_mode_tidak_diketahui"] = int(unknown.sum())
-        counts["dikecualikan_mode_lain"] = int(other.sum())
-        df = df[~unknown & ~other]
-    imputed = df["diimputasi"].map(BOOL_MAP)
-    if opt["exclude_imputed"]:
-        counts["dikecualikan_diimputasi"] = int((imputed == True).sum())  # noqa: E712
-        counts["dikecualikan_imputasi_tidak_diketahui"] = int(imputed.isna().sum())
-        df = df[imputed == False]  # noqa: E712 — hanya baris yang pasti tidak diimputasi
-    counts["setelah_mode_dan_imputasi"] = len(df)
-    if opt["exclude_outside_cluster"]:
-        outside = df["di_luar_klaster"].map(BOOL_MAP) if "di_luar_klaster" in df else pd.Series(False, index=df.index)
-        df = df[outside != True]  # noqa: E712 — log lama tanpa kolom ini: tidak ada yang dibuang
-    counts["setelah_buang_di_luar_klaster"] = len(df)
-    if opt["per_flow"] == "last":
-        df = df.groupby(["id_sesi", "flow_id"], sort=False).tail(1)
-    counts["setelah_per_flow"] = len(df)
-    ms = cfg["data"]["min_session"]
-    df = df.rename(columns={"fwd": COUNT_COLUMNS[0], "bwd": COUNT_COLUMNS[1]})
-    df = df[session_mask(df, ms["fwd"], ms["bwd"])]
-    counts["setelah_filter_sesi"] = len(df)
-
-    if len(df) < opt["min_rows"]:
-        raise InsufficientDataError(
-            f"Data log tidak cukup: {len(df)} baris < min_rows ({opt['min_rows']}) "
-            f"(baris log {counts['baris_log']} -> tanpa 'Data Belum Cukup' {counts['setelah_buang_data_belum_cukup']}"
-            f" -> mode/imputasi {counts['setelah_mode_dan_imputasi']} (mode tidak diketahui "
-            f"{counts.get('dikecualikan_mode_tidak_diketahui', 0)}, mode lain {counts.get('dikecualikan_mode_lain', 0)}, "
-            f"diimputasi {counts.get('dikecualikan_diimputasi', 0)})"
-            f" -> tanpa di luar klaster {counts['setelah_buang_di_luar_klaster']} -> per flow {counts['setelah_per_flow']}"
-            f" -> filter sesi {counts['setelah_filter_sesi']})."
-        )
-    feat = cfg["features"]
-    table = pd.DataFrame(
-        {
-            feat["delay_column"]: df["delay_ms"].to_numpy() * US_PER_MS,
-            feat["jitter_column"]: df["jitter_ms"].to_numpy() * US_PER_MS,
-            COUNT_COLUMNS[0]: df[COUNT_COLUMNS[0]].to_numpy(),
-            COUNT_COLUMNS[1]: df[COUNT_COLUMNS[1]].to_numpy(),
-        }
-    ).reset_index(drop=True)
-    return table, counts
 
 
 def apply_overrides(cfg: dict[str, Any], params: dict[str, Any] | None) -> dict[str, Any]:
@@ -152,36 +65,104 @@ def apply_overrides(cfg: dict[str, Any], params: dict[str, Any] | None) -> dict[
     return out
 
 
-def retrain(
+def preview(
+    cfg: dict[str, Any], uploads: list[tuple[str | Path, str]], mode: str, parent_version: str | None = None
+) -> Prepared:
+    """Pratinjau unggahan (format, baris per tahap, lama + baru = total) tanpa melatih. Versi induk default = versi aktif."""
+    try:
+        return prepare_dataset(cfg, uploads, mode, parent_version or active_version(cfg))
+    except DatasetError as exc:
+        raise RetrainError(str(exc)) from exc
+
+
+def load_version_documents(cfg: dict[str, Any], version: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(cluster_profile.json, train_meta.json) sebuah versi."""
+    folder = resolve_path(cfg["paths"]["artifacts_dir"]) / version
+    return (
+        json.loads((folder / "cluster_profile.json").read_text("utf-8")),
+        json.loads((folder / "train_meta.json").read_text("utf-8")),
+    )
+
+
+def comparison_table(old_profile: dict, old_meta: dict, new_eval: dict, new_n: int, old_version: str, new_version: str) -> pd.DataFrame:
+    """Tabel metrik model lama vs baru (kolom: metrik, <versi lama>, <versi baru>)."""
+    old_eval = {**old_profile["evaluation"], "n_data": old_meta.get("jumlah_baris_latih")}
+    new = {**new_eval, "n_data": new_n}
+    rows = []
+    for label, key in COMPARE_ROWS:
+        rows.append({"metrik": label, f"aktif ({old_version})": old_eval.get(key), f"baru ({new_version})": new.get(key)})
+    return pd.DataFrame(rows)
+
+
+def map_old_to_new(old_profile: dict[str, Any], result: dict[str, Any], cfg: dict[str, Any]) -> pd.DataFrame:
+    """Pemetaan klaster lama → klaster baru terdekat.
+
+    Centroid lama (satuan asli: delay_ms, jitter_ms, fai_pct) dikonversi ke ruang fitur model baru
+    (µs → kolom fitur → log1p → scaler baru) lalu dicari centroid baru terdekat (Euclidean).
+    """
+    feat = cfg["features"]
+    columns, log_columns = feat["cluster_columns"], feat["log_transform"]
+    originals = {feat["delay_column"]: ("delay_ms", US_PER_MS), feat["jitter_column"]: ("jitter_ms", US_PER_MS), "fai_pct": ("fai_pct", 1.0)}
+    unsupported = [c for c in columns if c not in originals]
+    if unsupported:
+        raise RetrainError(f"Pemetaan klaster butuh fitur delay/jitter/fai; fitur {unsupported} tidak didukung.")
+    olds = [c for c in old_profile["clusters"] if c.get("centroid_asli") and int(c["id_klaster"]) > 0]
+    new_cents = {int(k): np.asarray(v) for k, v in result["assignment"]["hdbscan"]["centroid"].items()}
+    new_names = {int(c["id_klaster"]): c for c in result["profile"]}
+    ids = sorted(new_cents)
+    rows = []
+    for c in olds:
+        raw = pd.DataFrame([{col: c["centroid_asli"][originals[col][0]] * originals[col][1] for col in columns}])
+        x = result["scaler"].transform(build_features(raw, columns, log_columns))[0]
+        dist = {k: float(np.linalg.norm(x - new_cents[k])) for k in ids}
+        nearest = min(dist, key=lambda k: (dist[k], k))
+        rows.append(
+            {
+                "klaster_lama": c["nama"], "anggota_lama": c["jumlah_anggota"], "klaster_baru": new_names[nearest]["nama"],
+                "jarak": round(dist[nearest], 4), "anggota_baru": new_names[nearest]["jumlah_anggota"],
+                "deskripsi_baru": new_names[nearest]["deskripsi"]["ringkas"],
+            }
+        )
+    return pd.DataFrame(rows, columns=["klaster_lama", "anggota_lama", "klaster_baru", "jarak", "anggota_baru", "deskripsi_baru"])
+
+
+def retrain_upload(
     cfg: dict[str, Any],
-    source: str,
+    uploads: list[tuple[str | Path, str]],
+    mode: str,
     params: dict[str, Any] | None = None,
     progress: Callable[[int, int], None] | None = None,
     monitoring_active: bool = False,
-    csv_path: str | Path | None = None,
-    log_files: list[Path] | None = None,
+    parent_version: str | None = None,
 ) -> dict[str, Any]:
-    """Latih model baru dan simpan sebagai versi baru (TIDAK diaktifkan).
+    """Latih model baru dari unggahan CSV dan simpan sebagai versi baru (TIDAK diaktifkan).
 
-    Kembalian: version, path, evaluation, params, profile, counts, source.
+    mode "tambah": data_latih.csv versi induk (default: aktif) + data baru; "ganti": hanya data baru.
+    Kembalian: version, path, evaluation, params, profile, data (Prepared), peringatan, perbandingan, pemetaan.
     """
     if monitoring_active:
         raise MonitoringActiveError("Latih ulang ditolak selama monitoring aktif. Hentikan sesi (Stop) dulu.")
-    if source not in SOURCES:
-        raise RetrainError(f"Sumber tidak dikenal: {source!r} (pilihan: {list(SOURCES)})")
     c = apply_overrides(cfg, params)
-    if source == "csv":
-        path = resolve_path(csv_path or c["data"]["raw_dir"])
-        flows, counts = load_training_frame(path, c)
-        info = {"jenis": "csv", "lokasi": str(path)}
-    else:
-        flows, counts = load_log_frame(c, log_files)
-        files = log_files if log_files is not None else list_log_files(c)
-        info = {"jenis": "log", "berkas": [str(f) for f in files], "opsi": c["retrain"]["log_source"]}
-    result = train(flows, c, counts=counts, progress=progress, source={**info, "jumlah_baris": counts})
+    parent = parent_version or active_version(c)
+    prep = preview(c, uploads, mode, parent)
+    if not prep.ok:
+        err = InsufficientDataError if any("minimum" in p or "baris baru" in p for p in prep.problems) else RetrainError
+        raise err(" | ".join(prep.problems))
+    source = {"jenis": "unggah", "mode": mode, "berkas": [(r.name, r.format) for r in prep.files], "sumber": ", ".join(prep.sources)}
+    result = train(prep.frame, c, progress=progress, source=source, data_meta=prep.info())
     out = save_artifacts(result, c, activate=False)  # tidak pernah mengaktifkan / menimpa current.txt
-    logger.info("Latih ulang (%s) selesai: versi %s", source, out.name)
+    logger.info("Latih ulang (%s, %d baris) selesai: versi %s", mode, prep.n_total, out.name)
+
+    comparison = mapping = None
+    if parent:
+        old_profile, old_meta = load_version_documents(c, parent)
+        comparison = comparison_table(old_profile, old_meta, result["evaluation"], result["n_train_rows"], parent, out.name)
+        try:
+            mapping = map_old_to_new(old_profile, result, c)
+        except RetrainError as exc:
+            result["peringatan"].append(str(exc))
     return {
         "version": out.name, "path": out, "evaluation": result["evaluation"], "params": result["params"],
-        "profile": result["profile"], "counts": counts, "source": info,
+        "profile": result["profile"], "data": prep, "peringatan": result["peringatan"], "parent": parent,
+        "perbandingan": comparison, "pemetaan": mapping,
     }

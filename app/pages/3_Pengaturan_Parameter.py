@@ -1,5 +1,8 @@
-"""P3 Pengaturan: parameter HDBSCAN, aturan seleksi, aturan batas jarak, ambang ITU, Perbarui Deskripsi Klaster, latih ulang, versi."""
+"""P3 Pengaturan: parameter HDBSCAN, aturan seleksi, aturan batas jarak, ambang ITU, Perbarui Deskripsi Klaster, latih ulang (unggah CSV), versi."""
 import json
+import shutil
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -7,7 +10,8 @@ import yaml
 
 import ui
 from qos.model.assignment import RULE_TEXT, RULES
-from qos.model.retrain import InsufficientDataError, RetrainError, load_log_frame, retrain
+from qos.model.dataset import DATA_FILE, data_path, stage_table
+from qos.model.retrain import RetrainError, preview, retrain_upload
 from qos.model.versions import VersionError, activate_version, description_changes, list_versions, refresh_descriptions
 
 st.set_page_config(page_title="Pengaturan Parameter", page_icon="⚙️", layout="wide")
@@ -127,31 +131,65 @@ if res:
     activate_button(res["version"], "act_describe")
 
 # ------------------------------------------------------------------------- Latih ulang
+MODE_LABELS = {"tambah": "Tambah ke data latih", "ganti": "Ganti data latih"}
 st.divider()
 st.subheader("Latih Ulang Model")
-source_label = st.radio("Sumber data latih", ["CSV CIC/Darknet (data.raw_dir)", "Log monitoring (reports/riwayat)"], horizontal=True, key="retrain_source")
-source = "csv" if source_label.startswith("CSV") else "log"
-log_ok = True
-if source == "log":
-    opt = cfg["retrain"]["log_source"]
-    st.caption(
-        f"Log dipakai dengan pengecualian: Data Belum Cukup (wajib), di luar klaster ({'ya' if opt['exclude_outside_cluster'] else 'tidak'}); "
-        f"{'satu baris per flow' if opt['per_flow'] == 'last' else 'semua jendela'}; minimum {opt['min_rows']} baris."
-    )
-    try:
-        _, counts = load_log_frame(cfg)
-        st.success(f"Data log mencukupi: {counts['setelah_filter_sesi']} baris (dari {counts['baris_log']} baris log).")
-    except InsufficientDataError as exc:
-        log_ok = False
-        st.warning(str(exc))
-    except RetrainError as exc:
-        log_ok = False
-        st.error(str(exc))
+st.caption(
+    "Unggah CSV `panggilan_<id_sesi>.csv` (hasil monitoring) dan/atau CSV flow format darknet/cic/bccc. "
+    f"**Tambah**: data latih model aktif ({art.version}) + data baru. **Ganti**: hanya data baru. "
+    f"Minimum {cfg['retrain']['min_rows']} baris; di bawah {cfg['retrain']['warn_rows']} baris hasilnya diberi peringatan."
+)
 if monitoring:
-    st.warning("Monitoring sedang berjalan: pelatihan ulang dinonaktifkan.")
+    st.warning("Monitoring sedang berjalan: pelatihan ulang dan tombol terkait dinonaktifkan.")
+
+active_data = data_path(cfg, art.version)
+if active_data.is_file():
+    st.download_button(
+        "Unduh data latih model aktif (CSV)", data=active_data.read_bytes(), file_name=f"data_latih_{art.version}.csv",
+        mime="text/csv", disabled=monitoring, key="dl_data_latih",
+    )
+else:
+    st.info(f"Model aktif belum punya {DATA_FILE}. Buat tanpa refit: python scripts/backfill_data_latih.py")
+
+uploaded = st.file_uploader("Berkas CSV (boleh lebih dari satu)", type=["csv"], accept_multiple_files=True, disabled=monitoring, key="retrain_files")
+mode_label = st.radio("Mode", list(MODE_LABELS.values()), horizontal=True, key="retrain_mode", disabled=monitoring)
+mode = next(k for k, v in MODE_LABELS.items() if v == mode_label)
+
+prep, prep_error, paths = None, None, []
+upload_dir = Path(tempfile.mkdtemp(prefix="qos_upload_"))
+if uploaded:
+    for i, f in enumerate(uploaded):
+        local = upload_dir / f"{i}_{Path(f.name).name}"
+        local.write_bytes(f.getvalue())
+        paths.append((local, f.name))
+    try:
+        prep = preview(cfg, paths, mode, art.version)
+    except RetrainError as exc:
+        prep_error = str(exc)
+
+if prep_error:
+    st.error(prep_error)
+if prep is not None:
+    st.markdown("**Pratinjau**")
+    st.dataframe(stage_table(prep), width="stretch", hide_index=True)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Data lama dipakai", prep.n_old)
+    k2.metric("Data baru lolos", prep.n_new)
+    k3.metric("Total data latih", prep.n_total)
+    k4.metric("Mode", mode.capitalize())
+    if mode == "ganti" and prep.n_old_dropped:
+        st.caption(f"Mode Ganti: {prep.n_old_dropped} baris data latih lama tidak dipakai (versi lama tetap utuh).")
+    for msg in prep.warnings:
+        st.warning(msg)
+    for msg in prep.problems:
+        st.error(msg)
+    if prep.n_new:
+        st.caption("10 baris contoh dari data baru")
+        st.dataframe(prep.new_rows.head(10), width="stretch", hide_index=True)
 
 confirm_retrain = st.checkbox("Saya mengerti ini membuat versi model baru", key="confirm_retrain", disabled=monitoring)
-if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not log_ok or not confirm_retrain):
+can_train = prep is not None and prep.ok
+if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not can_train or not confirm_retrain):
     bar = st.progress(0.0, text="Melatih model…")
     params = {
         "min_cluster_size": mcs, "min_samples": ms, "grid_enabled": grid, "thresholds": thresholds, "selection": selection,
@@ -162,7 +200,7 @@ if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not log
         bar.progress(done / total, text=f"Grid search {done}/{total}")
 
     try:
-        result = retrain(cfg, source, params, on_progress, monitoring_active=monitoring)
+        result = retrain_upload(cfg, paths, mode, params, on_progress, monitoring_active=monitoring, parent_version=art.version)
         bar.progress(1.0, text="Selesai")
         st.session_state["retrain_result"] = result
     except RetrainError as exc:
@@ -171,19 +209,22 @@ if st.button("Latih Ulang Model", disabled=monitoring or bool(errors) or not log
     except Exception as exc:  # noqa: BLE001 — kegagalan pelatihan ditampilkan, bukan dilempar ke UI
         bar.empty()
         st.error(f"Pelatihan gagal: {type(exc).__name__}: {exc}")
+shutil.rmtree(upload_dir, ignore_errors=True)  # berkas unggahan sementara
 res = st.session_state.get("retrain_result")
 if res:
-    ev = res["evaluation"]
+    d = res["data"]
     st.success(
-        f"Versi baru: {res['version']} (belum aktif) · parameter {res['params']['min_cluster_size']}/{res['params']['min_samples']}"
+        f"Versi baru: {res['version']} (belum aktif) · mode {MODE_LABELS[d.mode]} · {d.n_old} lama + {d.n_new} baru = {d.n_total} baris · "
+        f"parameter {res['params']['min_cluster_size']}/{res['params']['min_samples']}"
     )
-    m1, m2, m3, m4, m5 = st.columns(5)
-    sil = "-" if pd.isna(ev["silhouette"]) else f"{ev['silhouette']:.4f}"
-    m1.metric("Silhouette", sil, ev["silhouette_label"], delta_color="off")
-    m2.metric("DBCV", "-" if pd.isna(ev["dbcv"]) else f"{ev['dbcv']:.4f}")
-    m3.metric("CHI", "-" if pd.isna(ev["chi"]) else f"{ev['chi']:,.2f}")
-    m4.metric("Noise Ratio", f"{ev['noise_ratio']:.2%}")
-    m5.metric("Klaster", ev["n_clusters"])
+    for msg in [*d.warnings, *res["peringatan"]]:
+        st.warning(msg)
+    if res["perbandingan"] is not None:
+        st.markdown("**Model aktif vs model baru**")
+        st.dataframe(res["perbandingan"], width="stretch", hide_index=True)
+    if res["pemetaan"] is not None:
+        st.markdown("**Pemetaan klaster lama → klaster baru** (centroid lama diproyeksikan ke ruang fitur baru, lalu klaster baru terdekat)")
+        st.dataframe(res["pemetaan"], width="stretch", hide_index=True)
     st.dataframe(
         pd.DataFrame([{"klaster": c["nama"], "n": c["jumlah_anggota"], "deskripsi": c["deskripsi"]["ringkas"]} for c in res["profile"]]),
         width="stretch", hide_index=True,
